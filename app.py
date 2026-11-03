@@ -636,9 +636,8 @@ if player_team:
 
             event_id = selected_event["id"]
 
-          @st.cache_data(ttl=60, show_spinner=False)
-          def load_cached_props(event_id, market):
-            return get_player_props(event_id, market)
+            @st.cache_data(ttl=60,      show_spinner=False)
+            def load_cached_props(event_id, market):              return get_player_props(event_id, market)
 
           with st.spinner("Retrieving player props..."):
              data = load_cached_props(
