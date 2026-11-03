@@ -13,7 +13,7 @@ def get_player_games(player_id, season="2025-26"):
         game_log = playergamelog.PlayerGameLog(
             player_id=player_id,
             season=season,
-            timeout=30
+            timeout=10
         )
 
         games = game_log.get_data_frames()[0]
