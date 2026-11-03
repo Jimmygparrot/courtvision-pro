@@ -636,19 +636,19 @@ if player_team:
 
             event_id = selected_event["id"]
 
-            if st.button(
-                f"Load {player} Sportsbook Odds",
-                key="load_player_markets"
-            ):
-                with st.spinner("Retrieving player props..."):
-                    data = get_player_props(
-                        event_id,
-                        selected_market
-                    )
+          @st.cache_data(ttl=60, show_spinner=False)
+          def load_cached_props(event_id, market):
+            return get_player_props(event_id, market)
 
-                    results = compare_player(player, data)
+          with st.spinner("Retrieving player props..."):
+             data = load_cached_props(
+             event_id,
+             selected_market
+                )
 
-                    st.session_state["cv_live_results"] = results
+           results = compare_player(player, data)
+
+           st.session_state["cv_live_results"] = results
 
         else:
             st.warning(
