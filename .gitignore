@@ -1,0 +1,44 @@
+# Private API credentials
+.streamlit/secrets.toml
+.env
+.env.*
+
+# Python virtual environment
+.venv/
+venv/
+__pycache__/
+*.pyc
+
+# Application backups
+app_backup*.py
+app_before*.py
+*_backup.py
+*_fixed.py
+
+# Local caches
+player_teams.json
+player_team_timestamps.json
+
+# Temporary files
+*.log
+.DS_Store
+
+# Historical backtesting data
+backtest_players.csv
+chronological_backtest.csv
+courtvision_validation_results.csv
+historical_defense.csv
+hybrid_model_backtest.csv
+minutes_model_backtest.csv
+model_comparison.csv
+nba_backtest_results.csv
+opponent_adjustment_backtest.csv
+opponent_backtest_data.csv
+opponent_validation_split.csv
+
+# Additional development backups
+nba_stats_before_*.py
+player_teams_backup.json
+
+# Cloud migration backups
+live_odds_before_cloud.py
