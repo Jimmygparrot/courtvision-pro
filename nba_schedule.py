@@ -23,7 +23,7 @@ def get_next_game(team_name, days_ahead=7):
         try:
             board = scoreboardv2.ScoreboardV2(
                 game_date=game_date.strftime("%Y-%m-%d"),
-                timeout=30
+                timeout=5
             )
 
             games = board.get_data_frames()[0].drop_duplicates(
