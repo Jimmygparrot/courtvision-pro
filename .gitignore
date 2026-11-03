@@ -42,3 +42,4 @@ player_teams_backup.json
 
 # Cloud migration backups
 live_odds_before_cloud.py
+app_before_login.py

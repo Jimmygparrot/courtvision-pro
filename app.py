@@ -13,6 +13,47 @@ st.set_page_config(
     layout="wide"
 )
 
+
+# CourtVision Pro private login
+import hashlib
+import hmac
+
+def courtvision_login():
+    if st.session_state.get("cv_authenticated", False):
+        if st.sidebar.button("Log out"):
+            st.session_state["cv_authenticated"] = False
+            st.rerun()
+        return
+
+    st.title("🏀 CourtVision Pro")
+    st.subheader("Private Login")
+
+    with st.form("courtvision_login_form"):
+        password = st.text_input("Password", type="password")
+        submitted = st.form_submit_button("Log In")
+
+    if submitted:
+        salt = bytes.fromhex(st.secrets["CV_PASSWORD_SALT"])
+        expected = bytes.fromhex(st.secrets["CV_PASSWORD_HASH"])
+        iterations = int(st.secrets["CV_PASSWORD_ITERATIONS"])
+
+        actual = hashlib.pbkdf2_hmac(
+            "sha256",
+            password.encode(),
+            salt,
+            iterations
+        )
+
+        if hmac.compare_digest(actual, expected):
+            st.session_state["cv_authenticated"] = True
+            st.rerun()
+        else:
+            st.error("Incorrect password.")
+
+    st.stop()
+
+courtvision_login()
+
 # Cache NBA statistics separately for each player and season
 @st.cache_data(ttl=3600)
 def load_cached_games(player_id, season):
