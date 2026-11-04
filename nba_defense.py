@@ -2,20 +2,33 @@ import streamlit as st
 from nba_api.stats.endpoints import leaguedashteamstats
 
 
-@st.cache_data(ttl=21600)
-def get_defensive_stats(season="2026-27"):
-    stats = leaguedashteamstats.LeagueDashTeamStats(
-        season=season,
-        measure_type_detailed_defense="Opponent",
-        per_mode_detailed="PerGame",
-        timeout=30
-    )
+@st.cache_data(ttl=300)
+def _fetch_defensive_stats(season):
+    try:
+        stats = leaguedashteamstats.LeagueDashTeamStats(
+            season=season,
+            measure_type_detailed_defense="Opponent",
+            per_mode_detailed="PerGame",
+            timeout=5
+        )
+        df = stats.get_data_frames()[0]
+        required = {"TEAM_NAME", "GP", "OPP_PTS", "OPP_REB", "OPP_AST"}
+        if df.empty or not required.issubset(df.columns):
+            return None
+        return df
+    except Exception:
+        return None
 
-    return stats.get_data_frames()[0]
+
+def get_defensive_stats(season="2026-27"):
+    return _fetch_defensive_stats(season)
 
 
 def get_defense_factors(opponent, season="2026-27"):
     df = get_defensive_stats(season)
+
+    if df is None:
+        return None
 
     row = df[df["TEAM_NAME"] == opponent]
 
