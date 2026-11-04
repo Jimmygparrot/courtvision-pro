@@ -369,7 +369,7 @@ else:
 
     # Ensure newest games appear first
     games = games.sort_values(
-        "Game_ID",
+        "GAME_DATE",
         ascending=False
     )
 
