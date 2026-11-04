@@ -1,6 +1,5 @@
 import requests
-import tomli
-from pathlib import Path
+import unicodedata
 
 
 BASE_URL = "https://api.the-odds-api.com/v4"
@@ -15,7 +14,7 @@ def get_nba_events():
     response = requests.get(
         f"{BASE_URL}/sports/basketball_nba/events/",
         params={"apiKey": get_api_key()},
-        timeout=30
+        timeout=(3.05, 8)
     )
     response.raise_for_status()
     return response.json()
@@ -30,7 +29,7 @@ def get_player_props(event_id, market="player_points"):
             "markets": market,
             "oddsFormat": "american"
         },
-        timeout=30
+        timeout=(3.05, 8)
     )
     response.raise_for_status()
     return response.json()
@@ -42,15 +41,21 @@ def implied_probability(odds):
     return abs(odds) / (abs(odds) + 100)
 
 
+def normalize_player_name(name):
+    name = unicodedata.normalize("NFKD", str(name))
+    return "".join(char for char in name if char.isalnum()).casefold()
+
+
 def compare_player(player, data):
     results = []
+    target = normalize_player_name(player)
 
     for book in data.get("bookmakers", []):
         for market in book.get("markets", []):
             outcomes = market.get("outcomes", [])
 
             for over in outcomes:
-                if over.get("description") != player:
+                if normalize_player_name(over.get("description", "")) != target:
                     continue
 
                 if over.get("name") != "Over":
@@ -59,7 +64,7 @@ def compare_player(player, data):
                 under = next(
                     (
                         item for item in outcomes
-                        if item.get("description") == player
+                        if normalize_player_name(item.get("description", "")) == target
                         and item.get("name") == "Under"
                         and item.get("point") == over.get("point")
                     ),
@@ -145,3 +150,4 @@ def find_team_event(team_name, events):
     matches.sort(key=lambda item: item[0])
 
     return matches[0][1]
+

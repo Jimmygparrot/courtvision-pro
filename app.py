@@ -1,7 +1,4 @@
 from nba_defense import get_defense_factors
-from nba_team_lookup import get_player_team
-from nba_schedule import get_next_game
-from nba_api.stats.endpoints import commonplayerinfo
 import streamlit as st
 import pandas as pd
 from nba_stats import get_player_id, get_player_games
@@ -57,11 +54,12 @@ courtvision_login()
 # Cache NBA statistics separately for each player and season
 @st.cache_data(ttl=3600)
 def load_cached_games(player_id, season):
-    return get_player_games(player_id, season=season)
+    games = get_player_games(player_id, season=season)
+    if games is None:
+        # Exceptions are not cached, so the user can retry a failed request.
+        raise RuntimeError("NBA statistics could not be downloaded. Please retry.")
+    return games
 
-# Load NBA player projections
-df = pd.read_csv("courtvision_predictions.csv")
-# Configure the application
 # Load NBA player and team directory
 nba_players = pd.read_csv("nba_players_teams.csv")
 
@@ -90,7 +88,12 @@ def load_recent_20_games(player_id):
     frames = []
 
     for season in ["2026-27", "2025-26"]:
-        games = load_cached_games(player_id, season)
+        try:
+            games = load_cached_games(player_id, season)
+        except RuntimeError:
+            if not frames:
+                raise
+            break
 
         if games is not None and not games.empty:
             frames.append(games)
@@ -150,21 +153,38 @@ stat = st.sidebar.selectbox(
     ]
 )
 
-# Estimate playing time from recent NBA games
-minutes_player_id = get_player_id(player)
+# Requests are explicit so a slow statistics endpoint cannot block page startup.
+player_id = get_player_id(player)
+selection_key = (player, stat)
+if st.session_state.get("cv_analysis_selection") != selection_key:
+    st.session_state["cv_live_results"] = []
+    st.session_state["cv_selected_event"] = None
+    st.session_state["cv_analysis_selection"] = selection_key
+
+if st.sidebar.button("Load Player Statistics", key="cv_load_statistics"):
+    if player_id is None:
+        st.sidebar.warning("Player ID not found.")
+    else:
+        try:
+            with st.spinner(f"Loading recent NBA games for {player}..."):
+                loaded_games = load_recent_20_games(player_id)
+            st.session_state[f"cv_games_{player_id}"] = loaded_games
+            if loaded_games is None or loaded_games.empty:
+                st.sidebar.warning("No recent games found for this player.")
+        except RuntimeError as error:
+            st.sidebar.warning(str(error))
+
+# Reuse the loaded baseline throughout the page; widgets do not trigger requests.
+games = st.session_state.get(f"cv_games_{player_id}")
+statistics_available = games is not None and not games.empty
 estimated_minutes = 35
-
-if minutes_player_id is not None:
-    minutes_games = load_recent_20_games(minutes_player_id)
-
-    if minutes_games is not None and not minutes_games.empty:
-        recent_minutes = pd.to_numeric(
-            minutes_games["MIN"].head(10),
-            errors="coerce"
-        ).dropna()
-
-        if not recent_minutes.empty:
-            estimated_minutes = round(recent_minutes.mean())
+if statistics_available:
+    recent_minutes = pd.to_numeric(games["MIN"].head(10), errors="coerce").dropna()
+    if not recent_minutes.empty:
+        estimated_minutes = round(recent_minutes.mean())
+else:
+    st.info("Select a player, then choose Load Player Statistics in the sidebar. "
+            "Live odds and manual odds can be used independently below.")
 
 estimated_minutes = max(15, min(48, estimated_minutes))
 
@@ -176,36 +196,13 @@ minutes = st.sidebar.slider(
     key=f"minutes_{player}_{estimated_minutes}"
 )
 
-# Example data for interface testing
-sample_stats = {
-    "Jayson Tatum": [27.0, 8.0, 5.0],
-    "Luka Doncic": [30.0, 8.0, 9.0],
-    "Nikola Jokic": [26.0, 12.0, 9.0],
-    "Stephen Curry": [27.0, 5.0, 6.0]
-}
+# Only real downloaded statistics are used for projections.
+points, rebounds, assists = 0.0, 0.0, 0.0
+if statistics_available:
+    points = games["PTS"].head(20).mean()
+    rebounds = games["REB"].head(20).mean()
+    assists = games["AST"].head(20).mean()
 
-
-# Combine current and previous season for a 20-game baseline
-
-
-# Retrieve sample statistics when available
-player_stats = sample_stats.get(player)
-
-if player_stats is not None:
-    points, rebounds, assists = player_stats
-else:
-    points, rebounds, assists = 0.0, 0.0, 0.0
-
-player_id = get_player_id(player)
-games = None
-
-if player_id is not None:
-    games = load_recent_20_games(player_id)
-    
-    if games is not None and not games.empty:
-        points = games["PTS"].head(20).mean()
-        rebounds = games["REB"].head(20).mean()
-        assists = games["AST"].head(20).mean()
 # Adjust statistics using actual historical playing time
 historical_minutes = 35.0
 
@@ -237,43 +234,29 @@ projected_pra = (
 )
 
 
-# Upcoming opponent display
-@st.cache_data(ttl=3600)
-def cached_next_game(team_name):
-    return get_next_game(team_name)
-
+# Matchup information comes from the same events used for live odds.
+# No separate day-by-day NBA schedule requests are needed.
 st.subheader("🏀 Upcoming Matchup")
-
-try:
-    if player_id is not None:
-        full_team_name = get_player_team(player_id)
-
-        if not full_team_name:
-            raise ValueError("Player team information unavailable")
-
-        next_game = cached_next_game(full_team_name)
-
-        if next_game:
-            st.write(
-                f"**{player} — {full_team_name} "
-                f"vs. {next_game['opponent']}**"
-            )
-            st.write(
-                f"📅 {next_game['date']} | "
-                f"Location: {next_game['location']}"
-            )
-        else:
-            st.info("No upcoming matchup found in the next seven days.")
-    else:
-        st.info("Player team information unavailable.")
-
-except Exception as error:
-    st.warning(f"Matchup information unavailable: {error}")
+selected_event = st.session_state.get("cv_selected_event")
+next_game = None
+if selected_event:
+    player_rows = nba_players[nba_players["full_name"] == player]
+    full_team_name = player_rows.iloc[0]["team_name"] if not player_rows.empty else None
+    is_home = selected_event["home_team"] == full_team_name
+    next_game = {
+        "opponent": selected_event["away_team"] if is_home else selected_event["home_team"],
+        "date": selected_event["commence_time"],
+        "location": "Home" if is_home else "Away"
+    }
+    st.write(f"**{player} — vs. {next_game['opponent']}**")
+    st.write(f"📅 {next_game['date']} | Location: {next_game['location']}")
+else:
+    st.info("Load live odds below to look up the upcoming matchup.")
 
 # Experimental opponent-adjusted projections
 st.subheader("Opponent-Adjusted Projections")
 
-if "next_game" in locals() and next_game:
+if next_game and statistics_available and st.checkbox("Load opponent adjustment", value=False):
     try:
         opponent = next_game["opponent"]
         factors = get_defense_factors(opponent)
@@ -319,20 +302,20 @@ if "next_game" in locals() and next_game:
         else:
             st.info("Opponent defensive statistics unavailable.")
 
-    except Exception as error:
-        st.warning(f"Unable to calculate opponent adjustment: {error}")
+    except Exception:
+        st.warning("Opponent adjustment is unavailable. You can continue using the dashboard.")
 else:
-    st.info("No upcoming opponent available for adjustment.")
+    st.info("Load player statistics and live odds to enable the optional opponent adjustment.")
 
 st.caption("The original projections below are not opponent-adjusted.")
 
 # Display metrics
 col1, col2, col3, col4 = st.columns(4)
 
-col1.metric("Points", f"{projected_points:.1f}")
-col2.metric("Rebounds", f"{projected_rebounds:.1f}")
-col3.metric("Assists", f"{projected_assists:.1f}")
-col4.metric("PRA", f"{projected_pra:.1f}")
+col1.metric("Points", f"{projected_points:.1f}" if statistics_available else "—")
+col2.metric("Rebounds", f"{projected_rebounds:.1f}" if statistics_available else "—")
+col3.metric("Assists", f"{projected_assists:.1f}" if statistics_available else "—")
+col4.metric("PRA", f"{projected_pra:.1f}" if statistics_available else "—")
 
 st.divider()
 
@@ -348,7 +331,7 @@ st.subheader(f"{player} — {stat} Projection")
 
 st.metric(
     "Projected Value",
-    f"{projections[stat]:.1f}"
+    f"{projections[stat]:.1f}" if statistics_available else "—"
 )
 
 st.caption("Projections are experimental and have not been backtested.")
@@ -360,216 +343,201 @@ st.caption("Projections are experimental and have not been backtested.")
 st.divider()
 st.header("Real NBA Player Statistics")
 
-if st.button("Load Player Game Logs"):
-    st.session_state["load_games"] = True
+if not statistics_available:
+    st.info("Use Load Player Statistics in the sidebar to populate game logs and projections.")
+else:
+    # The same recent games support the charts, projections, and EV calculators.
+    st.success(f"Statistics loaded for {player}!")
 
-if st.session_state.get("load_games", False):
+    columns = [
+        "GAME_DATE",
+        "MATCHUP",
+        "MIN",
+        "PTS",
+        "REB",
+        "AST"
+    ]
 
-    player_id = get_player_id(player)
+    st.dataframe(
+        games[columns].head(20),
+        use_container_width=True,
+        hide_index=True
+    )
 
-    if player_id is None:
-        st.error("Player ID not found.")
+    # Calculate actual NBA averages
+    st.subheader("NBA Performance Averages")
 
-    else:
-        with st.spinner("Downloading NBA statistics..."):
+    # Ensure newest games appear first
+    games = games.sort_values(
+        "Game_ID",
+        ascending=False
+    )
 
-            games = load_cached_games(player_id, "2026-27")
+    # Calculate Points + Rebounds + Assists
+    games["PRA"] = (
+        games["PTS"]
+        + games["REB"]
+        + games["AST"]
+    )
 
-        if games is None or games.empty:
-            st.warning("No game statistics available.")
+    stats_columns = ["PTS", "REB", "AST", "PRA"]
 
-        else:
-            st.success(f"Statistics loaded for {player}!")
+    averages = []
 
-            columns = [
-                "GAME_DATE",
-                "MATCHUP",
-                "MIN",
-                "PTS",
-                "REB",
-                "AST"
-            ]
+    for period in [5, 10, 20]:
+        recent = games.head(period)
 
-            st.dataframe(
-                games[columns].head(20),
-                use_container_width=True,
-                hide_index=True
+        row = {
+            "Period": f"Last {period} Games ({len(recent)} available)"
+        }
+
+        for stat_name in stats_columns:
+            row[stat_name] = round(
+                recent[stat_name].mean(), 1
             )
 
-            # Calculate actual NBA averages
-            st.subheader("NBA Performance Averages")
+        averages.append(row)
 
-            # Ensure newest games appear first
-            games = games.sort_values(
-                "Game_ID",
-                ascending=False
-            )
+    averages_df = pd.DataFrame(averages)
 
-            # Calculate Points + Rebounds + Assists
-            games["PRA"] = (
-                games["PTS"]
-                + games["REB"]
-                + games["AST"]
-            )
+    st.dataframe(
+        averages_df,
+        use_container_width=True,
+        hide_index=True
+    )
 
-            stats_columns = ["PTS", "REB", "AST", "PRA"]
-
-            averages = []
-
-            for period in [5, 10, 20]:
-                recent = games.head(period)
-
-                row = {
-                    "Period": f"Last {period} Games ({len(recent)} available)"
-                }
-
-                for stat_name in stats_columns:
-                    row[stat_name] = round(
-                        recent[stat_name].mean(), 1
-                    )
-
-                averages.append(row)
-
-            averages_df = pd.DataFrame(averages)
-
-            st.dataframe(
-                averages_df,
-                use_container_width=True,
-                hide_index=True
-            )
-
-            # Interactive NBA performance chart
-            st.subheader("NBA Game-by-Game Performance")
+    # Interactive NBA performance chart
+    st.subheader("NBA Game-by-Game Performance")
     
-            chart_stats = {
-                "Points": "PTS",
-                "Rebounds": "REB",
-                "Assists": "AST",
-                "PRA": "PRA"
-            }
+    chart_stats = {
+        "Points": "PTS",
+        "Rebounds": "REB",
+        "Assists": "AST",
+        "PRA": "PRA"
+    }
     
-            selected_column = chart_stats[stat]
+    selected_column = chart_stats[stat]
     
-            chart_data = games.copy()
+    chart_data = games.copy()
     
-            chart_data["GAME_DATE"] = pd.to_datetime(
-                chart_data["GAME_DATE"]
-            )
+    chart_data["GAME_DATE"] = pd.to_datetime(
+        chart_data["GAME_DATE"]
+    )
     
-            chart_data = chart_data.sort_values("GAME_DATE")
+    chart_data = chart_data.sort_values("GAME_DATE")
     
-            fig = px.line(
-                chart_data,
-                x="GAME_DATE",
-                y=selected_column,
-                markers=True,
-                title=f"{player} — {stat} Performance"
-            )
+    fig = px.line(
+        chart_data,
+        x="GAME_DATE",
+        y=selected_column,
+        markers=True,
+        title=f"{player} — {stat} Performance"
+    )
     
-            fig.add_hline(
-                y=chart_data[selected_column].mean(),
-                line_dash="dash",
-                annotation_text="Average"
-            )
+    fig.add_hline(
+        y=chart_data[selected_column].mean(),
+        line_dash="dash",
+        annotation_text="Average"
+    )
     
-            fig.update_layout(
-                xaxis_title="Game Date",
-                yaxis_title=stat
-            )
+    fig.update_layout(
+        xaxis_title="Game Date",
+        yaxis_title=stat
+    )
     
-            st.plotly_chart(fig, use_container_width=True)
+    st.plotly_chart(fig, use_container_width=True)
     
-            # Player Prop Analyzer
-            st.divider()
-            st.subheader("🏀 Player Prop Analyzer")
+    # Player Prop Analyzer
+    st.divider()
+    st.subheader("🏀 Player Prop Analyzer")
     
-            prop_line = st.number_input(
-                f"Enter {player}'s {stat} betting line",
-                min_value=0.5,
-                max_value=100.5,
-                value=30.5,
-                step=0.5,
-                key="player_prop_line"
-            )
+    prop_line = st.number_input(
+        f"Enter {player}'s {stat} betting line",
+        min_value=0.5,
+        max_value=100.5,
+        value=30.5,
+        step=0.5,
+        key="player_prop_line"
+    )
     
-            st.write(f"Selected Player: {player}")
-            st.write(f"Statistic: {stat}")
-            st.write(f"Betting Line: {prop_line}")
+    st.write(f"Selected Player: {player}")
+    st.write(f"Statistic: {stat}")
+    st.write(f"Betting Line: {prop_line}")
     
-            # Calculate historical over/under results
-            prop_results = games[selected_column].dropna()
+    # Calculate historical over/under results
+    prop_results = games[selected_column].dropna()
     
-            total_games = len(prop_results)
+    total_games = len(prop_results)
     
-            over_games = (prop_results > prop_line).sum()
-            under_games = (prop_results < prop_line).sum()
-            push_games = (prop_results == prop_line).sum()
+    over_games = (prop_results > prop_line).sum()
+    under_games = (prop_results < prop_line).sum()
+    push_games = (prop_results == prop_line).sum()
     
-            if total_games > 0:
-                over_pct = (over_games / total_games) * 100
-                under_pct = (under_games / total_games) * 100
+    if total_games > 0:
+        over_pct = (over_games / total_games) * 100
+        under_pct = (under_games / total_games) * 100
     
-                st.subheader("Historical Over/Under Results")
+        st.subheader("Historical Over/Under Results")
     
-                col1, col2, col3 = st.columns(3)
+        col1, col2, col3 = st.columns(3)
     
-                col1.metric("Over", f"{over_pct:.1f}%")
-                col2.metric("Under", f"{under_pct:.1f}%")
-                col3.metric("Games Analyzed", total_games)
+        col1.metric("Over", f"{over_pct:.1f}%")
+        col2.metric("Under", f"{under_pct:.1f}%")
+        col3.metric("Games Analyzed", total_games)
     
-                st.write(
-                    f"Over: {over_games} | "
-                    f"Under: {under_games} | "
-                    f"Push: {push_games}"
-                )
+        st.write(
+            f"Over: {over_games} | "
+            f"Under: {under_games} | "
+            f"Push: {push_games}"
+        )
     
-                st.caption(
-                    "Historical results only. These percentages "
-                    "are not predictions of future outcomes."
-                )
+        st.caption(
+            "Historical results only. These percentages "
+            "are not predictions of future outcomes."
+        )
     
-                        # Historical over/under performance chart
-            st.subheader("Game-by-Game Over/Under Chart")
+        # Historical over/under performance chart
+    st.subheader("Game-by-Game Over/Under Chart")
     
-            chart_games = games.copy()
-            chart_games["GAME_DATE"] = pd.to_datetime(
-                chart_games["GAME_DATE"]
-            )
-            chart_games = chart_games.sort_values("GAME_DATE")
+    chart_games = games.copy()
+    chart_games["GAME_DATE"] = pd.to_datetime(
+        chart_games["GAME_DATE"]
+    )
+    chart_games = chart_games.sort_values("GAME_DATE")
     
-            chart_games["Result"] = chart_games[selected_column].apply(
-                lambda value: "Over" if value > prop_line
-                else "Under" if value < prop_line
-                else "Push"
-            )
+    chart_games["Result"] = chart_games[selected_column].apply(
+        lambda value: "Over" if value > prop_line
+        else "Under" if value < prop_line
+        else "Push"
+    )
     
-            fig_ou = px.bar(
-                chart_games,
-                x="GAME_DATE",
-                y=selected_column,
-                color="Result",
-                color_discrete_map={
-                    "Over": "green",
-                    "Under": "red",
-                    "Push": "gold"
-                },
-                title=f"{player} - {stat} vs Betting Line"
-            )
+    fig_ou = px.bar(
+        chart_games,
+        x="GAME_DATE",
+        y=selected_column,
+        color="Result",
+        color_discrete_map={
+            "Over": "green",
+            "Under": "red",
+            "Push": "gold"
+        },
+        title=f"{player} - {stat} vs Betting Line"
+    )
     
-            fig_ou.add_hline(
-                y=prop_line,
-                line_dash="dash",
-                line_color="red",
-                annotation_text=f"Betting Line: {prop_line}"
-            )
+    fig_ou.add_hline(
+        y=prop_line,
+        line_dash="dash",
+        line_color="red",
+        annotation_text=f"Betting Line: {prop_line}"
+    )
     
-            fig_ou.update_layout(
-                xaxis_title="Game Date",
-                yaxis_title=stat,
-                showlegend=False
-            )
+    fig_ou.update_layout(
+        xaxis_title="Game Date",
+        yaxis_title=stat,
+        showlegend=False
+    )
     
-            st.plotly_chart(fig_ou, use_container_width=True)
+    st.plotly_chart(fig_ou, use_container_width=True)
 
 
 # LIVE SPORTSBOOK COMPARISON
@@ -608,53 +576,41 @@ player_team = (
     else None
 )
 
-# Clear stale results when player or statistic changes
-selection_key = (player, selected_market)
-
-if st.session_state.get("cv_last_selection") != selection_key:
-    st.session_state["cv_live_results"] = []
-    st.session_state["cv_last_selection"] = selection_key
-
-@st.cache_data(ttl=900)
+@st.cache_data(ttl=900, show_spinner=False)
 def load_upcoming_nba_events():
     return get_nba_events()
 
+@st.cache_data(ttl=60, show_spinner=False)
+def load_cached_props(event_id, market):
+    return get_player_props(event_id, market)
+
+st.caption("Odds load on request. Refresh retrieves current player prices; "
+           "changing a calculator input does not make another odds request.")
 if player_team:
     st.info(f"Selected player: {player} | Team: {player_team}")
-
-    try:
-        events = load_upcoming_nba_events()
-        selected_event = find_team_event(player_team, events)
-
-        if selected_event:
-            matchup = (
-                f"{selected_event['away_team']} at "
-                f"{selected_event['home_team']}"
-            )
-
-            st.success(f"Upcoming matchup: {matchup}")
-
-            event_id = selected_event["id"]
-
-            @st.cache_data(ttl=60, show_spinner=False)
-            def load_cached_props(event_id, market):
-                return get_player_props(event_id, market)
-
-            with st.spinner("Retrieving player props..."):
-                data = load_cached_props(event_id, selected_market)
-
-            results = compare_player(player, data)
-            st.session_state["cv_live_results"] = results
-
-        else:
-            st.warning(
-                f"No upcoming sportsbook matchup currently "
-                f"available for {player_team}."
-            )
-
-    except Exception as error:
-        st.error(f"NBA odds retrieval failed: {error}")
-
+    if st.button("Load / Refresh Live Odds", key="cv_refresh_odds"):
+        st.session_state["cv_live_results"] = []
+        st.session_state["cv_selected_event"] = None
+        try:
+            with st.spinner("Finding the next sportsbook matchup..."):
+                # Refresh this lookup so an event that has just started is not reused.
+                load_upcoming_nba_events.clear()
+                events = load_upcoming_nba_events()
+                selected_event = find_team_event(player_team, events)
+            if selected_event:
+                st.session_state["cv_selected_event"] = selected_event
+                event_id = selected_event["id"]
+                with st.spinner("Retrieving player props..."):
+                    load_cached_props.clear(event_id, selected_market)
+                    data = load_cached_props(event_id, selected_market)
+                st.session_state["cv_live_results"] = compare_player(player, data)
+                st.rerun()
+            else:
+                st.warning(f"No upcoming sportsbook matchup available for {player_team}.")
+        except Exception as error:
+            # Never display a request URL: it can contain the API key.
+            st.error("Live odds could not be loaded. "
+                     "Check the Odds API key and quota, then try Refresh again.")
 else:
     st.warning("Unable to identify the selected player's NBA team.")
 
@@ -880,13 +836,13 @@ for book_key, book_name in SPORTSBOOKS.items():
     else:
         sportsbook_rows.append({
             "Sportsbook": book_name,
-            "Betting Line": "Not available",
-            "Over Odds": "Not available",
-            "Under Odds": "Not available",
+            "Betting Line": None,
+            "Over Odds": None,
+            "Under Odds": None,
             "Over EV": "Not available",
             "Under EV": "Not available",
             "Data Connection": (
-                "Odds API connected; player props pending"
+                "No live odds loaded for this selection"
                 if book_key == "draftkings"
                 else "Not connected"
             )
@@ -922,7 +878,7 @@ if "cv_live_results" in st.session_state:
 
         auto_player_id = get_player_id(player)
         auto_games = (
-            load_recent_20_games(auto_player_id)
+            st.session_state.get(f"cv_games_{auto_player_id}")
             if auto_player_id is not None else None
         )
 
@@ -1045,7 +1001,7 @@ st.subheader("📊 Probability & EV Calculator")
 from scipy.stats import norm
 
 cv_projection = st.number_input(
-    "CourtVision Projected Points",
+    f"CourtVision Projected {stat}",
     min_value=0.0,
     value=round(float(projections.get(stat, 0.0)), 2),
     step=0.1,
@@ -1070,7 +1026,7 @@ cv_market = st.number_input(
 )
 
 cv_player_id = get_player_id(player)
-cv_games = load_recent_20_games(cv_player_id) if cv_player_id is not None else None
+cv_games = st.session_state.get(f"cv_games_{cv_player_id}")
 
 if cv_games is None or len(cv_games) < 20:
     cv_count = 0 if cv_games is None else len(cv_games)
@@ -1138,3 +1094,4 @@ st.caption(
     "EV assumes the market percentage equals the executable price "
     "of a $1 payout contract and excludes fees."
 )
+

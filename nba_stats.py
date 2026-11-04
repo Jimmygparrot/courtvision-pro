@@ -18,15 +18,12 @@ def get_player_games(player_id, season="2025-26"):
 
         games = game_log.get_data_frames()[0]
 
-        if games.empty:
-            print("No games found.")
-            return None
-
         return games
 
     except Exception as error:
-        print(f"NBA API error: {error}")
-        return None
+        raise RuntimeError(
+            "NBA statistics could not be downloaded. Please retry."
+        ) from error
 import pandas as pd
 
 
@@ -57,3 +54,4 @@ def get_player_id(player_name):
         return None
 
     return int(matches.iloc[0]["id"])
+
