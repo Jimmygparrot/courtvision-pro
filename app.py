@@ -1061,7 +1061,7 @@ else:
 
 cv_valid_count = len(cv_values)
 
-if cv_valid_count >= 10:
+if cv_valid_count >= 5:
     cv_auto_sd = float(cv_values.std())
     if not pd.notna(cv_auto_sd) or cv_auto_sd <= 0:
         cv_auto_sd = None
@@ -1072,7 +1072,7 @@ if cv_auto_sd is None:
     st.warning(
         f"Insufficient or invalid variability data "
         f"({cv_valid_count} valid games). "
-        "At least 10 valid games with nonzero variability are required."
+        "At least 5 valid games with nonzero variability are required."
     )
 
 if cv_auto_sd is None:
