@@ -774,6 +774,7 @@ stat_column = {
 }.get(stat)
 
 comparison_sd = None
+comparison_sample_size = 0
 comparison_projection = float(projections.get(stat, 0.0))
 
 if games is not None and stat_column is not None:
@@ -792,8 +793,15 @@ if games is not None and stat_column is not None:
             comparison_games[stat_column], errors="coerce"
         ).dropna()
 
-        if len(comparison_values) >= 10 and comparison_values.std() > 0:
+        if len(comparison_values) >= 5 and comparison_values.std() > 0:
             comparison_sd = float(comparison_values.std())
+            comparison_sample_size = len(comparison_values)
+
+if 5 <= comparison_sample_size < 10:
+    st.warning(
+        f"Preliminary EV estimate: only {comparison_sample_size} games "
+        "available. Small samples can produce unreliable probabilities."
+    )
 
 for book_key, book_name in SPORTSBOOKS.items():
     matches = [
