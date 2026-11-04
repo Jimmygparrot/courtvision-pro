@@ -88,6 +88,10 @@ def load_recent_20_games(player_id):
     frames = []
 
     for season in ["2026-27", "2025-26"]:
+        if frames:
+            from nba_stats import read_cached_games
+            if read_cached_games(player_id, season) is None:
+                break
         try:
             games = load_cached_games(player_id, season)
         except RuntimeError:
