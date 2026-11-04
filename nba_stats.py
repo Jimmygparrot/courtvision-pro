@@ -1,7 +1,27 @@
+from pathlib import Path
+import pandas as pd
+
+def read_cached_games(player_id, season):
+    cache_file = (
+        Path(__file__).resolve().parent
+        / "data"
+        / "nba_cache"
+        / season
+        / f"{player_id}.csv"
+    )
+
+    if cache_file.exists():
+        return pd.read_csv(cache_file)
+
+    return None
+
 from nba_api.stats.endpoints import playergamelog
 
 
 def get_player_games(player_id, season="2025-26"):
+    cached_games = read_cached_games(player_id, season)
+    if cached_games is not None:
+        return cached_games
     """
     Retrieve NBA game statistics for a player.
 
