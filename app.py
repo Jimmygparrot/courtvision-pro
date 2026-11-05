@@ -486,7 +486,7 @@ else:
         yaxis_title=stat
     )
     
-    st.plotly_chart(fig, use_container_width=True)
+    st.plotly_chart(fig, use_container_width=True, config={"staticPlot": True})
     
     # Player Prop Analyzer
     st.divider()
@@ -578,7 +578,7 @@ else:
         showlegend=False
     )
     
-    st.plotly_chart(fig_ou, use_container_width=True)
+    st.plotly_chart(fig_ou, use_container_width=True, config={"staticPlot": True})
 
 
 # LIVE SPORTSBOOK COMPARISON
