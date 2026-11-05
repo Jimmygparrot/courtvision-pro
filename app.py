@@ -1,5 +1,4 @@
 from nba_defense import get_defense_factors
-from nba_schedule import get_next_game
 import streamlit as st
 import pandas as pd
 from nba_stats import get_player_id, get_player_games
@@ -239,33 +238,24 @@ projected_pra = (
 )
 
 
-@st.cache_data(ttl=3600, show_spinner=False)
-def load_team_schedule(team_name):
-    return get_next_game(team_name, days_ahead=7)
-
-
-# Upcoming matchup from the NBA schedule, not sportsbook odds.
+# Matchup information comes from the same events used for live odds.
+# No separate day-by-day NBA schedule requests are needed.
 st.subheader("🏀 Upcoming Matchup")
-
-player_rows = nba_players[nba_players["full_name"] == player]
-full_team_name = (
-    player_rows.iloc[0]["team_name"]
-    if not player_rows.empty else None
-)
-
+selected_event = st.session_state.get("cv_selected_event")
 next_game = None
-
-if full_team_name:
-    next_game = load_team_schedule(full_team_name)
-
-if next_game:
+if selected_event:
+    player_rows = nba_players[nba_players["full_name"] == player]
+    full_team_name = player_rows.iloc[0]["team_name"] if not player_rows.empty else None
+    is_home = selected_event["home_team"] == full_team_name
+    next_game = {
+        "opponent": selected_event["away_team"] if is_home else selected_event["home_team"],
+        "date": selected_event["commence_time"],
+        "location": "Home" if is_home else "Away"
+    }
     st.write(f"**{player} — vs. {next_game['opponent']}**")
-    st.write(
-        f"📅 {next_game['date']} | "
-        f"Location: {next_game['location']}"
-    )
+    st.write(f"📅 {next_game['date']} | Location: {next_game['location']}")
 else:
-    st.info("Upcoming NBA matchup unavailable.")
+    st.info("Load live odds below to look up the upcoming matchup.")
 
 # Experimental opponent-adjusted projections
 st.subheader("Opponent-Adjusted Projections")
