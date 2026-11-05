@@ -31,6 +31,10 @@ def get_next_game(team_name, days_ahead=7):
             )
 
             for _, game in games.iterrows():
+                # NBA status 1 = scheduled, 2 = live, 3 = final
+                if int(game["GAME_STATUS_ID"]) != 1:
+                    continue
+
                 home_id = int(game["HOME_TEAM_ID"])
                 away_id = int(game["VISITOR_TEAM_ID"])
 
