@@ -1,23 +1,24 @@
+from pathlib import Path
 import streamlit as st
 from nba_api.stats.endpoints import leaguedashteamstats
 
 
 @st.cache_data(ttl=300)
 def _fetch_defensive_stats(season):
-    try:
-        stats = leaguedashteamstats.LeagueDashTeamStats(
-            season=season,
-            measure_type_detailed_defense="Opponent",
-            per_mode_detailed="PerGame",
-            timeout=5
-        )
-        df = stats.get_data_frames()[0]
-        required = {"TEAM_NAME", "GP", "OPP_PTS", "OPP_REB", "OPP_AST"}
-        if df.empty or not required.issubset(df.columns):
-            return None
-        return df
-    except Exception:
+    import pandas as pd
+
+    cache_file = Path(__file__).resolve().parent / "data" / f"defense_{season}.csv"
+
+    if not cache_file.exists():
         return None
+
+    df = pd.read_csv(cache_file)
+    required = {"TEAM_NAME", "GP", "OPP_PTS", "OPP_REB", "OPP_AST"}
+
+    if df.empty or not required.issubset(df.columns):
+        return None
+
+    return df
 
 
 def get_defensive_stats(season="2026-27"):
