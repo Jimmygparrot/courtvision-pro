@@ -6,7 +6,7 @@ import plotly.express as px
 
 st.set_page_config(
     page_title="CourtVision Pro",
-    page_icon="🏀",
+    page_icon="static/courtvision-pro-logo.png",
     layout="wide"
 )
 
@@ -71,6 +71,7 @@ team_names = sorted(
 
 
 # Application heading
+st.image("static/courtvision-pro-logo.png", width=250)
 st.title("🏀 CourtVision Pro")
 st.subheader("NBA Player Prop Analytics")
 
