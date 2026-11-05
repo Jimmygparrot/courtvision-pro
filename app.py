@@ -238,24 +238,61 @@ projected_pra = (
 )
 
 
-# Matchup information comes from the same events used for live odds.
-# No separate day-by-day NBA schedule requests are needed.
+# Upcoming matchup from the locally saved NBA schedule
+@st.cache_data
+def load_nba_schedule():
+    return pd.read_csv("data/nba_schedule_2026-27.csv")
+
 st.subheader("🏀 Upcoming Matchup")
-selected_event = st.session_state.get("cv_selected_event")
+
+schedule = load_nba_schedule()
+player_rows = nba_players[nba_players["full_name"] == player]
 next_game = None
-if selected_event:
-    player_rows = nba_players[nba_players["full_name"] == player]
-    full_team_name = player_rows.iloc[0]["team_name"] if not player_rows.empty else None
-    is_home = selected_event["home_team"] == full_team_name
-    next_game = {
-        "opponent": selected_event["away_team"] if is_home else selected_event["home_team"],
-        "date": selected_event["commence_time"],
-        "location": "Home" if is_home else "Away"
-    }
-    st.write(f"**{player} — vs. {next_game['opponent']}**")
-    st.write(f"📅 {next_game['date']} | Location: {next_game['location']}")
-else:
-    st.info("Load live odds below to look up the upcoming matchup.")
+
+if not player_rows.empty:
+    player_team = player_rows.iloc[0]["team_name"]
+
+    schedule = schedule.copy()
+    schedule["gameDateTimeUTC"] = pd.to_datetime(
+        schedule["gameDateTimeUTC"], utc=True
+    )
+
+    schedule["home_team"] = (
+        schedule["homeTeam_teamCity"] + " " +
+        schedule["homeTeam_teamName"]
+    )
+    schedule["away_team"] = (
+        schedule["awayTeam_teamCity"] + " " +
+        schedule["awayTeam_teamName"]
+    )
+
+    upcoming = schedule[
+        (
+            (schedule["home_team"] == player_team) |
+            (schedule["away_team"] == player_team)
+        ) &
+        (schedule["gameDateTimeUTC"] > pd.Timestamp.now(tz="UTC"))
+    ].sort_values("gameDateTimeUTC")
+
+    if not upcoming.empty:
+        game = upcoming.iloc[0]
+        is_home = game["home_team"] == player_team
+
+        next_game = {
+            "opponent": game["away_team"] if is_home else game["home_team"],
+            "date": game["gameDateTimeUTC"].tz_convert(
+                "America/New_York"
+            ).strftime("%B %d, %Y at %I:%M %p ET"),
+            "location": "Home" if is_home else "Away"
+        }
+
+        st.write(f"**{player} — vs. {next_game['opponent']}**")
+        st.write(
+            f"📅 {next_game['date']} | Location: {next_game['location']}"
+        )
+
+if next_game is None:
+    st.info("No upcoming NBA matchup found.")
 
 # Experimental opponent-adjusted projections
 st.subheader("Opponent-Adjusted Projections")
