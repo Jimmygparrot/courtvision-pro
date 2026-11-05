@@ -306,8 +306,8 @@ if next_game and statistics_available and st.checkbox("Load opponent adjustment"
         else:
             st.info("Opponent defensive statistics unavailable.")
 
-    except Exception:
-        st.warning("Opponent adjustment is unavailable. You can continue using the dashboard.")
+    except Exception as error:
+        st.error(f"Opponent adjustment error: {type(error).__name__}: {error}")
 else:
     st.info("Load player statistics and live odds to enable the optional opponent adjustment.")
 
