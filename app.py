@@ -10,6 +10,23 @@ st.set_page_config(
     layout="wide"
 )
 
+st.html(
+    """
+    <script>
+    (() => {
+        let manifestLink = document.querySelector('link[rel="manifest"]');
+        if (!manifestLink) {
+            manifestLink = document.createElement("link");
+            manifestLink.rel = "manifest";
+            document.head.appendChild(manifestLink);
+        }
+        manifestLink.href = "/app/static/courtvision-pro.webmanifest";
+    })();
+    </script>
+    """,
+    unsafe_allow_javascript=True,
+)
+
 
 # CourtVision Pro private login
 import hashlib
