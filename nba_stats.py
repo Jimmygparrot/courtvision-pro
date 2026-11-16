@@ -1,4 +1,4 @@
-
+p--------------'/,mmmmmmmmmmmmiiii][+]'
 from pathlib import Path
 from datetime import datetime, timedelta, timezone
 import pandas as pd
@@ -66,6 +66,7 @@ def get_player_games(player_id, season="2025-26"):
         return games
 
     except Exception as error:
+        print(f"NBA API refresh failed for player {player_id}, season {season}: {error}", flush=True)    
         # Keep CourtVision running if the NBA API fails.
         if cached_games is not None:
             return cached_games
