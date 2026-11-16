@@ -199,6 +199,18 @@ if st.sidebar.button("Load Player Statistics", key="cv_load_statistics"):
 # Reuse the loaded baseline throughout the page; widgets do not trigger requests.
 games = st.session_state.get(f"cv_games_{player_id}")
 statistics_available = games is not None and not games.empty
+if statistics_available:
+    latest_game = pd.to_datetime(
+        games["GAME_DATE"], errors="coerce"
+    ).max()
+
+    if pd.notna(latest_game):
+        st.sidebar.success(
+            f"Latest Game Used: {latest_game:%b %d, %Y}"
+        )
+        st.sidebar.caption(
+            f"Games in projection sample: {min(len(games), 20)}"
+        )
 estimated_minutes = 35
 if statistics_available:
     recent_minutes = pd.to_numeric(games["MIN"].head(10), errors="coerce").dropna()
