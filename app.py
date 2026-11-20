@@ -3,6 +3,7 @@ import streamlit as st
 import pandas as pd
 from nba_stats import get_player_id, get_player_games
 import plotly.express as px
+from datetime import datetime, timedelta, timezone
 
 st.set_page_config(
     page_title="CourtVision Pro",
@@ -68,15 +69,6 @@ def courtvision_login():
 
 courtvision_login()
 
-# Cache NBA statistics separately for each player and season
-@st.cache_data(ttl=3600)
-def load_cached_games(player_id, season):
-    games = get_player_games(player_id, season=season)
-    if games is None:
-        # Exceptions are not cached, so the user can retry a failed request.
-        raise RuntimeError("NBA statistics could not be downloaded. Please retry.")
-    return games
-
 # Load NBA player and team directory
 nba_players = pd.read_csv("nba_players_teams.csv")
 
@@ -88,7 +80,11 @@ team_names = sorted(
 
 
 # Application heading
-st.image("static/courtvision-pro-logo.png", width=250)
+st.image(
+    "static/courtvision-pro-logo.png",
+    width=250,
+    alt="CourtVision Pro basketball analytics logo",
+)
 st.title("🏀 CourtVision Pro")
 st.subheader("NBA Player Prop Analytics")
 
@@ -96,14 +92,269 @@ st.write("Version 0.1 — Interactive Basketball Dashboard")
 
 st.divider()
 
+dashboard_view = st.segmented_control(
+    "Analytics",
+    ["Player props", "Game winners", "Prediction history"],
+    default="Player props",
+    key="cv_dashboard_view",
+    width="stretch",
+    wrap=True,
+)
+
+if dashboard_view in {"Game winners", "Prediction history"}:
+    from nba_predictions import (
+        EASTERN,
+        MODEL_VERSION,
+        build_pregame_predictions,
+        extract_completed_results,
+        format_eastern_datetime,
+        load_current_season_team_games,
+        load_previous_season_team_games,
+        load_todays_matchups,
+        prediction_accuracy,
+        read_prediction_history,
+        save_prediction_snapshots,
+        update_prediction_results,
+    )
+    from backtesting.nba_daily_predictions import build_prediction_pdf
+
+    today = datetime.now(EASTERN).date()
+
+    @st.cache_data(ttl=900, max_entries=4, show_spinner=False)
+    def cached_todays_matchups(game_date):
+        return load_todays_matchups(game_date)
+
+    @st.cache_data(ttl=3600, max_entries=2, show_spinner=False)
+    def cached_team_game_logs():
+        try:
+            return load_current_season_team_games(), None
+        except Exception as error:
+            return (
+                pd.DataFrame(),
+                "Current-season results are unavailable; predictions use "
+                "the prior-season baseline where available "
+                f"({type(error).__name__}).",
+            )
+
+    if dashboard_view == "Game winners":
+        st.subheader(f"NBA game winners — {today:%B %d, %Y}")
+        st.caption(
+            "Pregame estimates use only team results from dates before each "
+            "game date. Same-day results and live standings are not used."
+        )
+        if st.button(
+            "Refresh games and model inputs",
+            key="cv_refresh_game_predictions",
+            icon=":material/refresh:",
+        ):
+            cached_todays_matchups.clear()
+            cached_team_game_logs.clear()
+            st.rerun()
+        games_today, schedule_source, schedule_warning = (
+            cached_todays_matchups(str(today))
+        )
+        if schedule_warning:
+            st.warning(schedule_warning)
+        if (
+            not games_today.empty
+            and games_today.loc[
+                games_today["status"] == "scheduled", "tipoff_utc"
+            ].isna().any()
+        ):
+            st.warning(
+                "Some scheduled matchups have no verifiable tipoff time; "
+                "pregame predictions for those games are withheld."
+            )
+        current_results, results_warning = cached_team_game_logs()
+        if results_warning:
+            st.warning(results_warning)
+        previous_results = load_previous_season_team_games()
+
+        fresh_predictions = build_pregame_predictions(
+            games_today,
+            current_results,
+            previous_results,
+        )
+        save_prediction_snapshots(fresh_predictions)
+        history = read_prediction_history()
+        if not history.empty:
+            today_predictions = history[
+                history["game_date"] == str(today)
+            ].copy()
+        else:
+            today_predictions = pd.DataFrame()
+
+        if today_predictions.empty:
+            st.info(
+                "No pregame predictions are available for today. "
+                "Predictions are not reconstructed after tipoff."
+            )
+        else:
+            st.caption(
+                f"Model: {MODEL_VERSION} · Schedule: {schedule_source}. "
+                "Each saved prediction is an immutable pregame snapshot."
+            )
+            table = today_predictions.rename(columns={
+                "game_date": "Game date",
+                "home_team": "Home",
+                "away_team": "Away",
+                "predicted_winner": "Predicted winner",
+                "home_win_probability": "Home win probability",
+                "away_win_probability": "Away win probability",
+                "rating_source": "Rating data",
+            })
+            table["Prediction timestamp (ET)"] = today_predictions[
+                "created_at"
+            ].map(format_eastern_datetime)
+            table["Game Tipoff (ET)"] = today_predictions[
+                "tipoff_utc"
+            ].map(format_eastern_datetime)
+            table["Home win probability"] = table[
+                "Home win probability"
+            ].map(lambda value: f"{value:.1%}")
+            table["Away win probability"] = table[
+                "Away win probability"
+            ].map(lambda value: f"{value:.1%}")
+            st.dataframe(
+                table[[
+                    "Game date",
+                    "Away",
+                    "Home",
+                    "Predicted winner",
+                    "Home win probability",
+                    "Away win probability",
+                    "Prediction timestamp (ET)",
+                    "Game Tipoff (ET)",
+                ]],
+                hide_index=True,
+                alt="Today's saved pregame game winner predictions",
+            )
+            if today_predictions["rating_source"].str.contains(
+                "previous-season|neutral", regex=True
+            ).any():
+                st.caption(
+                    "Some team ratings use prior-season or neutral records "
+                    "because current-season results were not available."
+                )
+            try:
+                report = build_prediction_pdf(
+                    today_predictions,
+                    today,
+                )
+                st.download_button(
+                    "Download PDF report",
+                    data=report,
+                    file_name=f"CourtVision_Pro_{today}.pdf",
+                    mime="application/pdf",
+                    width="stretch",
+                )
+            except Exception as error:
+                st.error(
+                    "The PDF report could not be generated "
+                    f"({type(error).__name__})."
+                )
+        st.stop()
+
+    st.subheader("Prediction history")
+    if st.button(
+        "Refresh completed-game results",
+        key="cv_refresh_prediction_history",
+        icon=":material/refresh:",
+    ):
+        cached_team_game_logs.clear()
+        st.rerun()
+    current_results, results_warning = cached_team_game_logs()
+    if results_warning:
+        st.warning(results_warning)
+    actual_results = extract_completed_results(current_results)
+    update_prediction_results(actual_results)
+    history = read_prediction_history()
+    if history.empty:
+        st.info(
+            "No pregame predictions have been saved yet. Future games are "
+            "recorded only before tipoff."
+        )
+    else:
+        completed_count, accuracy = prediction_accuracy(history)
+        with st.container(horizontal=True):
+            st.metric("Predictions", len(history), border=True)
+            st.metric(
+                "Completed games",
+                completed_count,
+                border=True,
+            )
+            st.metric(
+                "Winner accuracy",
+                f"{accuracy:.1%}" if accuracy is not None else "—",
+                border=True,
+            )
+        results = history.copy()
+        results["Actual winner"] = results.apply(
+            lambda row: (
+                row["home_team"]
+                if pd.notna(row["actual_winner"])
+                and str(row["actual_winner"]) == str(row["home_team_id"])
+                else row["away_team"]
+                if pd.notna(row["actual_winner"])
+                else "Pending"
+            ),
+            axis=1,
+        )
+        results["Correct"] = results.apply(
+            lambda row: (
+                "Yes" if row["predicted_winner"] == row["Actual winner"]
+                else "No"
+            ) if row["Actual winner"] != "Pending" else "Pending",
+            axis=1,
+        )
+        results = results.rename(columns={
+            "game_date": "Game date",
+            "away_team": "Away",
+            "home_team": "Home",
+            "predicted_winner": "Predicted winner",
+            "model_version": "Model version",
+        })
+        results["Home win probability"] = results[
+            "home_win_probability"
+        ].map(lambda value: f"{value:.1%}")
+        results["Away win probability"] = results[
+            "away_win_probability"
+        ].map(lambda value: f"{value:.1%}")
+        results["Prediction timestamp (ET)"] = results[
+            "created_at"
+        ].map(format_eastern_datetime)
+        results["Game Tipoff (ET)"] = results[
+            "tipoff_utc"
+        ].map(format_eastern_datetime)
+        st.dataframe(
+            results[[
+                "Game date",
+                "Away",
+                "Home",
+                "Predicted winner",
+                "Actual winner",
+                "Correct",
+                "Home win probability",
+                "Away win probability",
+                "Prediction timestamp (ET)",
+                "Game Tipoff (ET)",
+                "Model version",
+            ]],
+            hide_index=True,
+            alt="Saved pregame predictions and completed game results",
+        )
+    st.caption(
+        "Actual results update saved records only; they never alter the "
+        "original prediction or its pregame inputs."
+    )
+    st.stop()
+
 # Sidebar controls
 st.sidebar.header("Player Analysis")
 
-@st.cache_data(ttl=3600)
-def load_recent_20_games(player_id):
-    import pandas as pd
-
+def load_recent_20_games(player_id, force_refresh=False):
     frames = []
+    refresh_errors = []
 
     for season in ["2026-27", "2025-26"]:
         if frames:
@@ -111,19 +362,47 @@ def load_recent_20_games(player_id):
             if read_cached_games(player_id, season) is None:
                 break
         try:
-            games = load_cached_games(player_id, season)
-        except RuntimeError:
+            games = get_player_games(
+                player_id,
+                season=season,
+                force_refresh=force_refresh and season == "2026-27",
+            )
+        except RuntimeError as error:
+            refresh_errors.append(str(error))
+            if season == "2026-27":
+                continue
             if not frames:
                 raise
             break
 
+        if games is None:
+            refresh_errors.append(
+                "NBA statistics could not be downloaded. Please retry."
+            )
+            if season == "2026-27":
+                continue
+            if not frames:
+                raise RuntimeError(
+                    "NBA statistics could not be downloaded. Please retry."
+                )
+            break
+        if games.attrs.get("refresh_error"):
+            refresh_errors.append(games.attrs["refresh_error"])
         if games is not None and not games.empty:
             frames.append(games)
 
-        if sum(len(frame) for frame in frames) >= 20:
-            break
+        if frames:
+            combined_count = pd.concat(frames, ignore_index=True)
+            if "Game_ID" in combined_count.columns:
+                combined_count = combined_count.drop_duplicates(
+                    subset=["Game_ID"]
+                )
+            if len(combined_count) >= 20:
+                break
 
     if not frames:
+        if refresh_errors:
+            raise RuntimeError(" ".join(dict.fromkeys(refresh_errors)))
         return None
 
     combined = pd.concat(frames, ignore_index=True)
@@ -133,13 +412,23 @@ def load_recent_20_games(player_id):
             combined["GAME_DATE"], errors="coerce"
         )
         combined = combined.sort_values(
-            "GAME_DATE", ascending=False
+            "GAME_DATE",
+            ascending=False,
+            na_position="last",
+            kind="stable",
         )
 
     if "Game_ID" in combined.columns:
-        combined = combined.drop_duplicates(subset=["Game_ID"])
+        combined = combined.drop_duplicates(
+            subset=["Game_ID"],
+            keep="first",
+        )
 
-    return combined.head(20).reset_index(drop=True)
+    combined = combined.head(20).reset_index(drop=True)
+    combined.attrs["refresh_error"] = (
+        " ".join(dict.fromkeys(refresh_errors)) if refresh_errors else None
+    )
+    return combined
 
 
 selected_team = st.sidebar.selectbox(
@@ -184,32 +473,101 @@ if st.session_state.get("cv_analysis_selection") != selection_key:
     st.session_state["cv_analysis_selection"] = selection_key
 
 if st.sidebar.button("Load Player Statistics", key="cv_load_statistics"):
-    load_cached_games.clear()
-    load_recent_20_games.clear()
     if player_id is None:
         st.sidebar.warning("Player ID not found.")
     else:
+        checked_at = datetime.now(timezone.utc)
         try:
             with st.spinner(f"Loading recent NBA games for {player}..."):
-                loaded_games = load_recent_20_games(player_id)
-            st.session_state[f"cv_games_{player_id}"] = loaded_games
+                loaded_games = load_recent_20_games(
+                    player_id,
+                    force_refresh=True,
+                )
+            if loaded_games is not None:
+                st.session_state[f"cv_games_{player_id}"] = loaded_games
+            st.session_state[f"cv_games_refresh_error_{player_id}"] = (
+                loaded_games.attrs.get("refresh_error")
+                if loaded_games is not None else None
+            )
             if loaded_games is None or loaded_games.empty:
                 st.sidebar.warning("No recent games found for this player.")
         except RuntimeError as error:
-            st.sidebar.warning(str(error))
+            st.session_state[f"cv_games_refresh_error_{player_id}"] = str(error)
+        finally:
+            st.session_state[f"cv_games_checked_{player_id}"] = (
+                checked_at.isoformat()
+            )
 
-# Reuse the loaded baseline throughout the page; widgets do not trigger requests.
+@st.fragment(run_every="15m")
+def refresh_loaded_player_stats(selected_player_id):
+    games_key = f"cv_games_{selected_player_id}"
+    previous_games = st.session_state.get(games_key)
+    if previous_games is None:
+        return
+
+    checked_value = st.session_state.get(
+        f"cv_games_checked_{selected_player_id}"
+    )
+    checked_at = (
+        datetime.fromisoformat(checked_value)
+        if checked_value else datetime.min.replace(tzinfo=timezone.utc)
+    )
+    if datetime.now(timezone.utc) - checked_at < timedelta(minutes=15):
+        return
+
+    previous_error = st.session_state.get(
+        f"cv_games_refresh_error_{selected_player_id}"
+    )
+    try:
+        refreshed_games = load_recent_20_games(selected_player_id)
+        if refreshed_games is not None:
+            st.session_state[games_key] = refreshed_games
+            current_error = refreshed_games.attrs.get("refresh_error")
+            st.session_state[
+                f"cv_games_refresh_error_{selected_player_id}"
+            ] = current_error
+        else:
+            current_error = previous_error
+    except RuntimeError as error:
+        current_error = str(error)
+        st.session_state[
+            f"cv_games_refresh_error_{selected_player_id}"
+        ] = current_error
+    finally:
+        st.session_state[f"cv_games_checked_{selected_player_id}"] = (
+            datetime.now(timezone.utc).isoformat()
+        )
+
+    current_games = st.session_state.get(games_key)
+    if (
+        previous_error != current_error
+        or current_games is None
+        or not previous_games.equals(current_games)
+    ):
+        st.rerun()
+
+
+if player_id is not None:
+    refresh_loaded_player_stats(player_id)
+
+# Reuse the latest successful baseline between refresh checks.
 games = st.session_state.get(f"cv_games_{player_id}")
+if games is not None:
+    games = games.copy()
 statistics_available = games is not None and not games.empty
+refresh_error = (
+    st.session_state.get(f"cv_games_refresh_error_{player_id}")
+    if player_id is not None else None
+)
+if refresh_error:
+    st.sidebar.warning(refresh_error)
 if statistics_available:
     latest_game = pd.to_datetime(
         games["GAME_DATE"], errors="coerce"
     ).max()
 
     if pd.notna(latest_game):
-        st.sidebar.success(
-            f"Latest Game Used: {latest_game:%b %d, %Y}"
-        )
+        st.sidebar.success(f"Latest available game: {latest_game:%b %d, %Y}")
         st.sidebar.caption(
             f"Games in projection sample: {min(len(games), 20)}"
         )
@@ -271,7 +629,7 @@ projected_pra = (
 
 
 # Upcoming matchup from the locally saved NBA schedule
-@st.cache_data
+@st.cache_data(ttl=900, max_entries=1)
 def load_nba_schedule():
     return pd.read_csv("data/nba_schedule_2026-27.csv")
 
@@ -365,7 +723,8 @@ if next_game and statistics_available and st.checkbox("Load opponent adjustment"
                     "Original": "{:.1f}",
                     "Opponent Adjusted": "{:.1f}"
                 }),
-                hide_index=True
+                hide_index=True,
+                alt="Original and opponent-adjusted player projections",
             )
 
             st.caption(
@@ -433,8 +792,8 @@ else:
 
     st.dataframe(
         games[columns].head(20),
-        use_container_width=True,
-        hide_index=True
+        hide_index=True,
+        alt="Most recent player game log",
     )
 
     # Calculate actual NBA averages
@@ -475,8 +834,8 @@ else:
 
     st.dataframe(
         averages_df,
-        use_container_width=True,
-        hide_index=True
+        hide_index=True,
+        alt="Player points, rebounds, assists, and PRA averages",
     )
 
     # Interactive NBA performance chart
@@ -518,7 +877,12 @@ else:
         yaxis_title=stat
     )
     
-    st.plotly_chart(fig, use_container_width=True, config={"staticPlot": True})
+    st.plotly_chart(
+        fig,
+        width="stretch",
+        config={"staticPlot": True, "responsive": True},
+        alt=f"{player} {stat} game-by-game trend",
+    )
     
     # Player Prop Analyzer
     st.divider()
@@ -610,7 +974,12 @@ else:
         showlegend=False
     )
     
-    st.plotly_chart(fig_ou, use_container_width=True, config={"staticPlot": True})
+    st.plotly_chart(
+        fig_ou,
+        width="stretch",
+        config={"staticPlot": True, "responsive": True},
+        alt=f"{player} {stat} results compared with the betting line",
+    )
 
 
 # LIVE SPORTSBOOK COMPARISON
@@ -710,7 +1079,10 @@ if "cv_live_results" in st.session_state:
                 "No-Vig Over %": over["No_Vig_Over"]
             })
 
-        st.dataframe(rows, use_container_width=True)
+        st.dataframe(
+            rows,
+            alt="Best available sportsbook prices for the selected player prop",
+        )
 
     else:
         st.warning(
@@ -931,8 +1303,8 @@ for book_key, book_name in SPORTSBOOKS.items():
 
 st.dataframe(
     pd.DataFrame(sportsbook_rows),
-    use_container_width=True,
-    hide_index=True
+    hide_index=True,
+    alt="Sportsbook prices and expected value for the selected player prop",
 )
 
 st.caption(
@@ -1053,7 +1425,7 @@ if "cv_live_results" in st.session_state:
                     ),
                     subset=["Over EV %", "Under EV %"]
                 ),
-                use_container_width=True
+                alt="Automatic expected-value estimates for available prop lines",
             )
 
             st.caption(

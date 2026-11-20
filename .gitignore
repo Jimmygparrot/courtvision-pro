@@ -18,6 +18,7 @@ app_before*.py
 # Local caches
 player_teams.json
 player_team_timestamps.json
+data/nba_prediction_history.sqlite3*
 
 # Temporary files
 *.log
