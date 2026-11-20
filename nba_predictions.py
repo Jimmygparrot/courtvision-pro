@@ -116,7 +116,7 @@ def _scoreboard_schedule(game_date, schedule_path):
 
     scoreboard = scoreboardv3.ScoreboardV3(
         game_date=str(game_date),
-        timeout=10,
+        timeout=30,
     )
     game_headers = scoreboard.game_header.get_data_frame()
     if game_headers.empty:
@@ -224,7 +224,7 @@ def load_current_season_team_games():
         player_or_team_abbreviation="T",
         season=CURRENT_SEASON,
         season_type_all_star="Regular Season",
-        timeout=10,
+        timeout=30,
     ).get_data_frames()[0]
 
 
