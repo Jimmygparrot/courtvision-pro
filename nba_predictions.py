@@ -52,6 +52,24 @@ def _game_status(value):
     return "scheduled"
 
 
+def _normalize_game_id(value):
+    game_id = str(value).strip()
+    return game_id.zfill(10) if game_id.isdigit() else game_id
+
+
+def format_eastern_datetime(value):
+    timestamp = pd.to_datetime(value, utc=True, errors="coerce")
+    if pd.isna(timestamp):
+        return "Unavailable"
+
+    local_time = timestamp.tz_convert(EASTERN)
+    hour = local_time.strftime("%I").lstrip("0") or "0"
+    return (
+        f"{local_time.strftime('%b')} {local_time.day}, {local_time.year}, "
+        f"{hour}:{local_time.strftime('%M %p %Z')}"
+    )
+
+
 def _local_schedule(schedule_path, game_date):
     path = Path(schedule_path)
     if not path.exists():
@@ -75,7 +93,7 @@ def _local_schedule(schedule_path, game_date):
         return pd.DataFrame()
 
     return pd.DataFrame({
-        "game_id": schedule["gameId"].astype(str),
+        "game_id": schedule["gameId"].map(_normalize_game_id),
         "game_date": schedule["game_date"],
         "tipoff_utc": schedule["tipoff_utc"],
         "home_team_id": schedule["homeTeam_teamId"].astype(str),
@@ -93,17 +111,20 @@ def _local_schedule(schedule_path, game_date):
 
 
 def _scoreboard_schedule(game_date, schedule_path):
-    from nba_api.stats.endpoints import scoreboardv2
+    from nba_api.stats.endpoints import scoreboardv3
     from nba_api.stats.static import teams
 
-    scoreboard = scoreboardv2.ScoreboardV2(
+    scoreboard = scoreboardv3.ScoreboardV3(
         game_date=str(game_date),
         timeout=10,
-    ).get_data_frames()[0]
-    if scoreboard.empty:
+    )
+    game_headers = scoreboard.game_header.get_data_frame()
+    if game_headers.empty:
         return pd.DataFrame()
 
-    names = {str(team["id"]): team["full_name"] for team in teams.get_teams()}
+    teams_by_abbreviation = {
+        team["abbreviation"]: team for team in teams.get_teams()
+    }
     local_games = _local_schedule(schedule_path, game_date)
     local_by_id = (
         local_games.set_index("game_id").to_dict("index")
@@ -111,20 +132,53 @@ def _scoreboard_schedule(game_date, schedule_path):
     )
     rows = []
 
-    for _, game in scoreboard.iterrows():
-        game_id = str(game["GAME_ID"])
-        home_id = str(game.get("HOME_TEAM_ID", game.get("TEAM_ID_HOME")))
-        away_id = str(game.get("VISITOR_TEAM_ID", game.get("TEAM_ID_AWAY")))
+    for _, game in game_headers.iterrows():
+        game_id = _normalize_game_id(game["gameId"])
         local = local_by_id.get(game_id, {})
+        game_code = str(game.get("gameCode", "")).rsplit("/", 1)[-1]
+        away_abbreviation = game_code[:3]
+        home_abbreviation = game_code[3:]
+        away_team = teams_by_abbreviation.get(away_abbreviation)
+        home_team = teams_by_abbreviation.get(home_abbreviation)
+
+        home_id = (
+            str(home_team["id"]) if home_team else local.get("home_team_id")
+        )
+        away_id = (
+            str(away_team["id"]) if away_team else local.get("away_team_id")
+        )
+        if home_id is None or away_id is None:
+            raise ValueError(
+                f"Unable to map NBA scoreboard game {game_id} to its teams."
+            )
+
+        tipoff = pd.to_datetime(
+            game.get("gameTimeUTC"),
+            utc=True,
+            errors="coerce",
+        )
+        if pd.isna(tipoff):
+            tipoff = pd.to_datetime(
+                local.get("tipoff_utc"),
+                utc=True,
+                errors="coerce",
+            )
+
         rows.append({
             "game_id": game_id,
             "game_date": str(game_date),
-            "tipoff_utc": local.get("tipoff_utc", pd.NaT),
+            "tipoff_utc": tipoff,
             "home_team_id": home_id,
-            "home_team": local.get("home_team", names.get(home_id, home_id)),
+            "home_team": (
+                local.get("home_team")
+                or (home_team["full_name"] if home_team else home_id)
+            ),
             "away_team_id": away_id,
-            "away_team": local.get("away_team", names.get(away_id, away_id)),
-            "status": _game_status(game.get("GAME_STATUS_ID")),
+            "away_team": (
+                local.get("away_team")
+                or (away_team["full_name"] if away_team else away_id)
+            ),
+            "status": _game_status(game.get("gameStatus")),
         })
 
     return pd.DataFrame(rows)

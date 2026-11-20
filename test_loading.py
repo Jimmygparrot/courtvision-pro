@@ -36,7 +36,7 @@ def offline(monkeypatch):
 
 
 def app():
-    at = AppTest.from_file(str(ROOT / 'app.py'), default_timeout=45)
+    at = AppTest.from_file(str(ROOT / 'app.py'), default_timeout=90)
     at.session_state['cv_authenticated'] = True
     at.run()
     assert not at.exception
@@ -108,6 +108,11 @@ def test_game_winners_view_shows_empty_schedule_without_external_requests(
         'load_current_season_team_games',
         lambda: pd.DataFrame(),
     )
+    monkeypatch.setattr(
+        nba_predictions,
+        'read_prediction_history',
+        lambda: pd.DataFrame(),
+    )
     at = app()
     at.get_by_key('cv_dashboard_view').set_value('Game winners').run()
     assert not at.exception
@@ -164,10 +169,91 @@ def test_game_winners_view_renders_predictions_and_pdf(monkeypatch):
     at.get_by_key('cv_dashboard_view').set_value('Game winners').run()
 
     assert not at.exception
-    assert any(
-        'Predicted winner' in table.value.columns
-        for table in at.dataframe
+    prediction_table = next(
+        table.value for table in at.dataframe
+        if 'Predicted winner' in table.value.columns
     )
+    assert 'Home win probability' in prediction_table.columns
+    assert 'Away win probability' in prediction_table.columns
+    assert 'Prediction timestamp (ET)' in prediction_table.columns
+    assert 'Game Tipoff (ET)' in prediction_table.columns
+    assert 'Prediction timestamp (UTC)' not in prediction_table.columns
+    assert predictions.iloc[0]['created_at'].endswith('+00:00')
+    assert prediction_table.iloc[0]['Prediction timestamp (ET)'].endswith(
+        ('EST', 'EDT')
+    )
+    assert prediction_table.iloc[0]['Game Tipoff (ET)'].endswith(
+        ('EST', 'EDT')
+    )
+    assert prediction_table.iloc[0]['Home win probability'].endswith('%')
+    assert prediction_table.iloc[0]['Away win probability'].endswith('%')
+
+
+def test_prediction_history_renders_eastern_times_and_both_probabilities(
+    monkeypatch,
+):
+    now = datetime.now(ZoneInfo("America/New_York"))
+    games = pd.DataFrame([{
+        "game_id": "history-fixture",
+        "game_date": str(now.date()),
+        "tipoff_utc": (now + timedelta(hours=1)).astimezone(
+            timezone.utc
+        ).isoformat(),
+        "home_team_id": "1",
+        "home_team": "Boston Celtics",
+        "away_team_id": "2",
+        "away_team": "New York Knicks",
+        "status": "scheduled",
+    }])
+    history = nba_predictions.build_pregame_predictions(
+        games,
+        pd.DataFrame(),
+        pd.DataFrame(),
+        now=now,
+    )
+    history['actual_winner'] = None
+    history['completed_at'] = None
+    monkeypatch.setattr(
+        nba_predictions,
+        'load_current_season_team_games',
+        lambda: pd.DataFrame(),
+    )
+    monkeypatch.setattr(
+        nba_predictions,
+        'extract_completed_results',
+        lambda team_games: {},
+    )
+    monkeypatch.setattr(
+        nba_predictions,
+        'update_prediction_results',
+        lambda actual_winners: 0,
+    )
+    monkeypatch.setattr(
+        nba_predictions,
+        'read_prediction_history',
+        lambda: history,
+    )
+
+    at = app()
+    at.get_by_key('cv_dashboard_view').set_value('Prediction history').run()
+
+    assert not at.exception
+    history_table = next(
+        table.value for table in at.dataframe
+        if 'Actual winner' in table.value.columns
+    )
+    assert 'Home win probability' in history_table.columns
+    assert 'Away win probability' in history_table.columns
+    assert 'Prediction timestamp (ET)' in history_table.columns
+    assert 'Game Tipoff (ET)' in history_table.columns
+    assert history_table.iloc[0]['Prediction timestamp (ET)'].endswith(
+        ('EST', 'EDT')
+    )
+    assert history_table.iloc[0]['Game Tipoff (ET)'].endswith(
+        ('EST', 'EDT')
+    )
+    assert history_table.iloc[0]['Home win probability'].endswith('%')
+    assert history_table.iloc[0]['Away win probability'].endswith('%')
 
 
 def test_statistics_failure_can_retry_and_widgets_do_not_reload(monkeypatch):

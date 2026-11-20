@@ -107,6 +107,7 @@ if dashboard_view in {"Game winners", "Prediction history"}:
         MODEL_VERSION,
         build_pregame_predictions,
         extract_completed_results,
+        format_eastern_datetime,
         load_current_season_team_games,
         load_previous_season_team_games,
         load_todays_matchups,
@@ -200,9 +201,14 @@ if dashboard_view in {"Game winners", "Prediction history"}:
                 "predicted_winner": "Predicted winner",
                 "home_win_probability": "Home win probability",
                 "away_win_probability": "Away win probability",
-                "created_at": "Prediction timestamp (UTC)",
                 "rating_source": "Rating data",
             })
+            table["Prediction timestamp (ET)"] = today_predictions[
+                "created_at"
+            ].map(format_eastern_datetime)
+            table["Game Tipoff (ET)"] = today_predictions[
+                "tipoff_utc"
+            ].map(format_eastern_datetime)
             table["Home win probability"] = table[
                 "Home win probability"
             ].map(lambda value: f"{value:.1%}")
@@ -217,7 +223,8 @@ if dashboard_view in {"Game winners", "Prediction history"}:
                     "Predicted winner",
                     "Home win probability",
                     "Away win probability",
-                    "Prediction timestamp (UTC)",
+                    "Prediction timestamp (ET)",
+                    "Game Tipoff (ET)",
                 ]],
                 hide_index=True,
                 alt="Today's saved pregame game winner predictions",
@@ -305,9 +312,20 @@ if dashboard_view in {"Game winners", "Prediction history"}:
             "away_team": "Away",
             "home_team": "Home",
             "predicted_winner": "Predicted winner",
-            "created_at": "Prediction timestamp (UTC)",
             "model_version": "Model version",
         })
+        results["Home win probability"] = results[
+            "home_win_probability"
+        ].map(lambda value: f"{value:.1%}")
+        results["Away win probability"] = results[
+            "away_win_probability"
+        ].map(lambda value: f"{value:.1%}")
+        results["Prediction timestamp (ET)"] = results[
+            "created_at"
+        ].map(format_eastern_datetime)
+        results["Game Tipoff (ET)"] = results[
+            "tipoff_utc"
+        ].map(format_eastern_datetime)
         st.dataframe(
             results[[
                 "Game date",
@@ -316,7 +334,10 @@ if dashboard_view in {"Game winners", "Prediction history"}:
                 "Predicted winner",
                 "Actual winner",
                 "Correct",
-                "Prediction timestamp (UTC)",
+                "Home win probability",
+                "Away win probability",
+                "Prediction timestamp (ET)",
+                "Game Tipoff (ET)",
                 "Model version",
             ]],
             hide_index=True,

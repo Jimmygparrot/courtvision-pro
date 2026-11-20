@@ -6,8 +6,11 @@ import pytest
 
 from backtesting.nba_daily_predictions import build_prediction_pdf
 from nba_predictions import (
+    _local_schedule,
+    _scoreboard_schedule,
     build_pregame_predictions,
     extract_completed_results,
+    format_eastern_datetime,
     load_todays_matchups,
     prediction_accuracy,
     read_prediction_history,
@@ -17,6 +20,32 @@ from nba_predictions import (
 
 
 NOW = datetime(2026, 11, 18, 16, 0, tzinfo=timezone.utc)
+
+
+@pytest.mark.parametrize(
+    ("timestamp", "expected"),
+    [
+        (
+            "2026-11-20T00:44:15.963797+00:00",
+            "Nov 19, 2026, 7:44 PM EST",
+        ),
+        (
+            "2026-07-20T00:44:15.963797+00:00",
+            "Jul 19, 2026, 8:44 PM EDT",
+        ),
+        (
+            "2026-11-20T00:00:00Z",
+            "Nov 19, 2026, 7:00 PM EST",
+        ),
+    ],
+)
+def test_utc_timestamp_formats_as_eastern_wall_time(timestamp, expected):
+    assert format_eastern_datetime(timestamp) == expected
+
+
+def test_unparseable_timestamp_is_labeled_unavailable():
+    assert format_eastern_datetime(None) == "Unavailable"
+    assert format_eastern_datetime("not a timestamp") == "Unavailable"
 
 
 def schedule_rows():
@@ -214,3 +243,101 @@ def test_todays_schedule_falls_back_to_saved_fixture_on_api_error(
     assert games.iloc[0]["game_id"] == "fixture"
     assert games.iloc[0]["home_team"] == "Boston Celtics"
     assert "TimeoutError" in warning
+
+
+def test_scoreboard_v3_utc_tipoff_joins_schedule_with_unpadded_game_id(
+    monkeypatch, tmp_path
+):
+    schedule_path = tmp_path / "schedule.csv"
+    pd.DataFrame([{
+        "gameId": "22600270",
+        "gameDateTimeUTC": "2026-11-20T01:00:00Z",
+        "gameStatus": 1,
+        "homeTeam_teamId": 1610612763,
+        "homeTeam_teamCity": "Memphis",
+        "homeTeam_teamName": "Grizzlies",
+        "awayTeam_teamId": 1610612744,
+        "awayTeam_teamCity": "Golden State",
+        "awayTeam_teamName": "Warriors",
+    }]).to_csv(schedule_path, index=False)
+
+    headers = pd.DataFrame([{
+        "gameId": "0022600270",
+        "gameCode": "20261119/GSWMEM",
+        "gameStatus": 1,
+        "gameTimeUTC": "2026-11-20T01:00:00Z",
+        "gameEt": "2026-11-19T20:00:00Z",
+    }])
+
+    class FakeScoreboard:
+        def __init__(self, **kwargs):
+            assert kwargs == {"game_date": "2026-11-19", "timeout": 10}
+            self.game_header = self
+
+        def get_data_frame(self):
+            return headers
+
+    monkeypatch.setattr(
+        "nba_api.stats.endpoints.scoreboardv3.ScoreboardV3",
+        FakeScoreboard,
+    )
+
+    games = _scoreboard_schedule("2026-11-19", schedule_path)
+
+    local_games = _local_schedule(schedule_path, "2026-11-19")
+    assert local_games["game_id"].tolist() == ["0022600270"]
+    assert _local_schedule(schedule_path, "2026-11-20").empty
+    assert len(games) == 1
+    assert games.iloc[0]["game_id"] == "0022600270"
+    assert games.iloc[0]["game_date"] == "2026-11-19"
+    assert games.iloc[0]["tipoff_utc"] == pd.Timestamp(
+        "2026-11-20T01:00:00Z"
+    )
+    assert games.iloc[0]["home_team"] == "Memphis Grizzlies"
+    assert games.iloc[0]["away_team"] == "Golden State Warriors"
+    assert games.iloc[0]["status"] == "scheduled"
+
+
+def test_scoreboard_final_game_is_never_returned_as_pregame_prediction(
+    monkeypatch, tmp_path
+):
+    schedule_path = tmp_path / "schedule.csv"
+    pd.DataFrame([{
+        "gameId": "22600270",
+        "gameDateTimeUTC": "2026-11-20T01:00:00Z",
+        "gameStatus": 1,
+        "homeTeam_teamId": 1610612763,
+        "homeTeam_teamCity": "Memphis",
+        "homeTeam_teamName": "Grizzlies",
+        "awayTeam_teamId": 1610612744,
+        "awayTeam_teamCity": "Golden State",
+        "awayTeam_teamName": "Warriors",
+    }]).to_csv(schedule_path, index=False)
+    headers = pd.DataFrame([{
+        "gameId": "0022600270",
+        "gameCode": "20261119/GSWMEM",
+        "gameStatus": 3,
+        "gameTimeUTC": "2026-11-20T01:00:00Z",
+    }])
+
+    class FakeScoreboard:
+        def __init__(self, **kwargs):
+            self.game_header = self
+
+        def get_data_frame(self):
+            return headers
+
+    monkeypatch.setattr(
+        "nba_api.stats.endpoints.scoreboardv3.ScoreboardV3",
+        FakeScoreboard,
+    )
+    games = _scoreboard_schedule("2026-11-19", schedule_path)
+    predictions = build_pregame_predictions(
+        games,
+        pd.DataFrame(),
+        pd.DataFrame(),
+        now=datetime(2026, 11, 19, 19, 0, tzinfo=timezone.utc),
+    )
+
+    assert games.iloc[0]["status"] == "final"
+    assert predictions.empty
