@@ -216,8 +216,15 @@ def load_todays_matchups(game_date, schedule_path=None):
             f"({type(error).__name__}).",
         )
 
-
 def load_current_season_team_games():
+    snapshot = ROOT / "data" / "historical" / f"nba_games_{CURRENT_SEASON}.csv"
+
+    if snapshot.exists():
+        games = pd.read_csv(snapshot)
+        games = games[games["WL"].isin(["W", "L"])].copy()
+        if not games.empty:
+            return games
+
     from nba_api.stats.endpoints import leaguegamelog
 
     return leaguegamelog.LeagueGameLog(
@@ -226,6 +233,7 @@ def load_current_season_team_games():
         season_type_all_star="Regular Season",
         timeout=30,
     ).get_data_frames()[0]
+
 
 
 def load_previous_season_team_games(path=None):
