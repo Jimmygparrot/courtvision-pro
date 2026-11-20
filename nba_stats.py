@@ -8,7 +8,7 @@ from nba_api.stats.endpoints import playergamelog
 
 
 CURRENT_SEASON = "2026-27"
-REFRESH_HOURS = 1
+REFRESH_HOURS = 6
 RETRY_MINUTES = 5
 
 _refresh_lock = threading.Lock()

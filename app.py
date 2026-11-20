@@ -481,7 +481,7 @@ if st.sidebar.button("Load Player Statistics", key="cv_load_statistics"):
             with st.spinner(f"Loading recent NBA games for {player}..."):
                 loaded_games = load_recent_20_games(
                     player_id,
-                    force_refresh=True,
+                    force_refresh=False,
                 )
             if loaded_games is not None:
                 st.session_state[f"cv_games_{player_id}"] = loaded_games
