@@ -190,6 +190,8 @@ def load_todays_matchups(game_date, schedule_path=None):
         schedule_path = ROOT / "data" / f"nba_schedule_{CURRENT_SEASON}.csv"
 
     local_games = _local_schedule(schedule_path, game_date)
+    if not local_games.empty:
+        return local_games, "saved schedule", None
     try:
         live_games = _scoreboard_schedule(game_date, schedule_path)
         if not live_games.empty:
