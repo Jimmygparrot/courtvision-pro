@@ -21,7 +21,13 @@ jobs:
           url="https://cdn.nba.com/static/json/liveData/scoreboard/todaysScoreboard_00.json"
           echo "Runner IP: $(curl -sS -m 10 https://api.ipify.org || echo unavailable)"
           set +e
-          status=$(curl -sS -m 20 -o body.json -w '%{http_code} connect=%{time_connect}s total=%{time_total}s bytes=%{size_download}' "$url" 2>err.txt)
+          status=$(curl -sS -m 20 \
+            -H 'User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36' \
+            -H 'Accept: application/json, text/plain, */*' \
+            -H 'Accept-Language: en-US,en;q=0.9' \
+            -H 'Referer: https://www.nba.com/' \
+            -H 'Origin: https://www.nba.com' \
+            -o body.json -w '%{http_code} connect=%{time_connect}s total=%{time_total}s bytes=%{size_download}' "$url" 2>err.txt)
           code=$?
           set -e
           echo "curl exit code: $code"
