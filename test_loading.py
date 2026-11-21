@@ -116,7 +116,10 @@ def test_game_winners_view_shows_empty_schedule_without_external_requests(
     at = app()
     at.get_by_key('cv_dashboard_view').set_value('Game winners').run()
     assert not at.exception
-    assert any('No pregame predictions' in item.value for item in at.info)
+    assert any(
+        'No current or original pregame predictions' in item.value
+        for item in at.info
+    )
 
 
 def test_game_winners_view_renders_predictions_and_pdf(monkeypatch):
@@ -171,22 +174,41 @@ def test_game_winners_view_renders_predictions_and_pdf(monkeypatch):
     assert not at.exception
     prediction_table = next(
         table.value for table in at.dataframe
-        if 'Predicted winner' in table.value.columns
+        if 'Current predicted winner' in table.value.columns
     )
-    assert 'Home win probability' in prediction_table.columns
-    assert 'Away win probability' in prediction_table.columns
-    assert 'Prediction timestamp (ET)' in prediction_table.columns
+    assert 'Current home win probability' in prediction_table.columns
+    assert 'Current away win probability' in prediction_table.columns
+    assert 'Calculated at (ET)' in prediction_table.columns
     assert 'Game Tipoff (ET)' in prediction_table.columns
     assert 'Prediction timestamp (UTC)' not in prediction_table.columns
     assert predictions.iloc[0]['created_at'].endswith('+00:00')
-    assert prediction_table.iloc[0]['Prediction timestamp (ET)'].endswith(
+    assert prediction_table.iloc[0]['Calculated at (ET)'].endswith(
         ('EST', 'EDT')
     )
     assert prediction_table.iloc[0]['Game Tipoff (ET)'].endswith(
         ('EST', 'EDT')
     )
-    assert prediction_table.iloc[0]['Home win probability'].endswith('%')
-    assert prediction_table.iloc[0]['Away win probability'].endswith('%')
+    assert prediction_table.iloc[0]['Current home win probability'].endswith(
+        '%'
+    )
+    assert prediction_table.iloc[0]['Current away win probability'].endswith(
+        '%'
+    )
+
+    original_table = next(
+        table.value for table in at.dataframe
+        if 'Original saved predicted winner' in table.value.columns
+    )
+    assert 'Original saved home win probability' in original_table.columns
+    assert 'Original saved away win probability' in original_table.columns
+    assert 'Original saved at (ET)' in original_table.columns
+    assert original_table.iloc[0]['Original saved home win probability'] \
+        .endswith('%')
+    assert any(
+        item.value == 'Original Saved Prediction' for item in at.subheader
+    )
+    assert not at.error
+    assert len(at.get('download_button')) == 1
 
 
 def test_prediction_history_renders_eastern_times_and_both_probabilities(

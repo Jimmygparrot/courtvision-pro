@@ -1,15 +1,20 @@
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
+import logging
 from pathlib import Path
 import math
+import os
 import sqlite3
+import tempfile
 from zoneinfo import ZoneInfo
 
 import pandas as pd
 
 
+logger = logging.getLogger(__name__)
 ROOT = Path(__file__).resolve().parent
 CURRENT_SEASON = "2026-27"
 PREVIOUS_SEASON = "2025-26"
+NBA_TEAM_COUNT = 30
 MODEL_VERSION = "pregame-win-rate-logistic-cross-season-v1"
 MODEL_COEFFICIENT = 4.1196
 MODEL_INTERCEPT = 0.1982
@@ -219,22 +224,328 @@ def load_todays_matchups(game_date, schedule_path=None):
         )
 
 def load_current_season_team_games():
+    """Load fresh current-season results or return a dated stale snapshot."""
     snapshot = ROOT / "data" / "historical" / f"nba_games_{CURRENT_SEASON}.csv"
+    snapshot_games = None
+    snapshot_latest_date = None
 
     if snapshot.exists():
-        games = pd.read_csv(snapshot)
-        games = games[games["WL"].isin(["W", "L"])].copy()
-        if not games.empty:
-            return games
+        try:
+            snapshot_games, snapshot_latest_date = _prepare_team_results(
+                pd.read_csv(snapshot)
+            )
+            logger.info(
+                "Loaded current-season team snapshot: path=%s rows=%d latest=%s",
+                snapshot,
+                len(snapshot_games),
+                snapshot_latest_date,
+            )
+        except (
+            OSError,
+            pd.errors.EmptyDataError,
+            pd.errors.ParserError,
+            ValueError,
+        ) as error:
+            logger.warning(
+                "Rejected current-season team snapshot at %s (%s: %s)",
+                snapshot,
+                type(error).__name__,
+                error,
+                exc_info=True,
+            )
+            snapshot_games = None
+            snapshot_latest_date = None
+    else:
+        logger.error(
+            "Current-season team snapshot is missing: path=%s",
+            snapshot,
+        )
+
+    if snapshot_games is not None:
+        age = _today_eastern() - snapshot_latest_date
+        if timedelta(0) <= age <= timedelta(days=1):
+            logger.info(
+                "Using fresh current-season team snapshot through %s",
+                snapshot_latest_date,
+            )
+            return _set_team_results_metadata(
+                snapshot_games,
+                source="saved current-season snapshot",
+                latest_game_date=snapshot_latest_date,
+                is_stale=False,
+            )
+
+    logger.info(
+        "Refreshing current-season team results from the NBA API; "
+        "valid_snapshot=%s",
+        snapshot_games is not None,
+    )
+    from nba_api.stats.endpoints import leaguegamelog
+
+    try:
+        api_games = leaguegamelog.LeagueGameLog(
+            player_or_team_abbreviation="T",
+            season=CURRENT_SEASON,
+            season_type_all_star="Regular Season",
+            timeout=30,
+        ).get_data_frames()[0]
+        api_games, api_latest_date = _prepare_team_results(api_games)
+        return _set_team_results_metadata(
+            api_games,
+            source="NBA API",
+            latest_game_date=api_latest_date,
+            is_stale=False,
+        )
+    except Exception as error:
+        if snapshot_games is None:
+            logger.error(
+                "NBA API refresh failed and no valid current-season snapshot "
+                "is available at %s (%s: %s)",
+                snapshot,
+                type(error).__name__,
+                error,
+                exc_info=True,
+            )
+            raise RuntimeError(
+                "Current-season NBA team results are unavailable "
+                f"({type(error).__name__}); no valid saved snapshot exists."
+            ) from error
+
+        latest_date = snapshot_latest_date.strftime("%b %d, %Y").replace(
+            " 0", " "
+        )
+        logger.warning(
+            "NBA API refresh failed (%s: %s); using current-season team "
+            "snapshot through %s at %s",
+            type(error).__name__,
+            error,
+            latest_date,
+            snapshot,
+            exc_info=True,
+        )
+        warning = (
+            "The NBA API refresh failed "
+            f"({type(error).__name__}); using the saved current-season "
+            f"snapshot through {latest_date}. The snapshot may be outdated."
+        )
+        return _set_team_results_metadata(
+            snapshot_games,
+            source="saved current-season snapshot",
+            latest_game_date=snapshot_latest_date,
+            is_stale=True,
+            warning=warning,
+        )
+
+
+def _prepare_team_results(games):
+    required = {"TEAM_ID", "GAME_DATE", "WL"}
+    if games is None or games.empty or not required.issubset(games.columns):
+        raise ValueError(
+            "NBA team results are empty or missing required columns."
+        )
+
+    results = games[games["WL"].isin(["W", "L"])].copy()
+    dates = pd.to_datetime(
+        results["GAME_DATE"],
+        format="mixed",
+        errors="coerce",
+    )
+    valid_dates = dates.notna()
+    results = results.loc[valid_dates].copy()
+    if results.empty:
+        raise ValueError("NBA team results contain no valid completed games.")
+
+    latest_game_date = dates.loc[valid_dates].max().date()
+    return results, latest_game_date
+
+
+def _validate_complete_team_results(games):
+    required = {"GAME_ID", "TEAM_ID", "GAME_DATE", "WL"}
+    if games is None or games.empty or not required.issubset(games.columns):
+        raise ValueError(
+            "Team results are empty or missing required game identifiers."
+        )
+
+    win_loss = games["WL"].fillna("").astype(str).str.strip().str.upper()
+    invalid_outcomes = ~win_loss.isin(["", "W", "L"])
+    if invalid_outcomes.any():
+        raise ValueError("Team results contain invalid win/loss outcomes.")
+
+    completed = games.loc[win_loss.isin(["W", "L"])].copy()
+    if completed.empty:
+        raise ValueError("Team results contain no completed games.")
+
+    results, latest_game_date = _prepare_team_results(completed)
+    if len(results) != len(completed):
+        raise ValueError("Completed team results contain invalid game dates.")
+
+    dates = pd.to_datetime(
+        results["GAME_DATE"],
+        format="mixed",
+        errors="coerce",
+    )
+    if dates.isna().any():
+        raise ValueError("Completed team results contain invalid game dates.")
+    if latest_game_date > _today_eastern():
+        raise ValueError("Team results contain a game date in the future.")
+
+    team_ids = pd.to_numeric(results["TEAM_ID"], errors="coerce")
+    if (
+        team_ids.isna().any()
+        or (team_ids <= 0).any()
+        or (team_ids % 1 != 0).any()
+    ):
+        raise ValueError("Team results contain invalid team IDs.")
+
+    game_ids = pd.to_numeric(results["GAME_ID"], errors="coerce")
+    if (
+        game_ids.isna().any()
+        or (game_ids <= 0).any()
+        or (game_ids % 1 != 0).any()
+    ):
+        raise ValueError("Team results contain invalid game IDs.")
+
+    results["TEAM_ID"] = team_ids.astype("int64")
+    results["GAME_ID"] = game_ids.astype("int64").map(
+        lambda game_id: f"{game_id:010d}"
+    )
+    results["GAME_DATE"] = dates.dt.strftime("%Y-%m-%d")
+    results["WL"] = win_loss.loc[results.index]
+
+    if results.duplicated(["GAME_ID", "TEAM_ID"]).any():
+        raise ValueError("Team results contain duplicate team-game rows.")
+    if results["TEAM_ID"].nunique() != NBA_TEAM_COUNT:
+        raise ValueError("Team results do not cover all 30 NBA teams.")
+
+    for game_id, rows in results.groupby("GAME_ID", sort=False):
+        if (
+            len(rows) != 2
+            or rows["TEAM_ID"].nunique() != 2
+            or sorted(rows["WL"].tolist()) != ["L", "W"]
+            or rows["GAME_DATE"].nunique() != 1
+        ):
+            raise ValueError(
+                f"Completed game {game_id} has incomplete or inconsistent "
+                "team results."
+            )
+
+    return results, latest_game_date
+
+
+def refresh_current_season_team_snapshot(snapshot_path=None):
+    """Fetch and atomically replace the current-season results snapshot."""
+    if snapshot_path is None:
+        snapshot_path = (
+            ROOT
+            / "data"
+            / "historical"
+            / f"nba_games_{CURRENT_SEASON}.csv"
+        )
+    snapshot_path = Path(snapshot_path)
 
     from nba_api.stats.endpoints import leaguegamelog
 
-    return leaguegamelog.LeagueGameLog(
-        player_or_team_abbreviation="T",
-        season=CURRENT_SEASON,
-        season_type_all_star="Regular Season",
-        timeout=30,
-    ).get_data_frames()[0]
+    logger.info("Refreshing current-season team snapshot at %s", snapshot_path)
+    try:
+        api_games = leaguegamelog.LeagueGameLog(
+            player_or_team_abbreviation="T",
+            season=CURRENT_SEASON,
+            season_type_all_star="Regular Season",
+            timeout=60,
+        ).get_data_frames()[0]
+        refreshed, latest_game_date = _validate_complete_team_results(
+            api_games
+        )
+    except Exception:
+        logger.exception(
+            "Current-season refresh failed; leaving the existing snapshot "
+            "untouched at %s",
+            snapshot_path,
+        )
+        raise
+
+    if snapshot_path.exists():
+        try:
+            existing, existing_latest_date = _validate_complete_team_results(
+                pd.read_csv(snapshot_path)
+            )
+        except (
+            OSError,
+            pd.errors.EmptyDataError,
+            pd.errors.ParserError,
+            ValueError,
+        ) as error:
+            logger.warning(
+                "Existing team snapshot is invalid and will only be replaced "
+                "after a validated API refresh (%s: %s)",
+                type(error).__name__,
+                error,
+            )
+        else:
+            if latest_game_date < existing_latest_date:
+                raise ValueError(
+                    "Refreshed team results are older than the current "
+                    "snapshot."
+                )
+
+            old_pairs = set(zip(existing["GAME_ID"], existing["TEAM_ID"]))
+            new_pairs = set(zip(refreshed["GAME_ID"], refreshed["TEAM_ID"]))
+            if not old_pairs.issubset(new_pairs):
+                raise ValueError(
+                    "Refreshed team results omit previously saved "
+                    "team-game records."
+                )
+
+    refreshed = refreshed.sort_values(
+        ["GAME_DATE", "GAME_ID", "TEAM_ID"],
+        ascending=[False, False, True],
+    ).reset_index(drop=True)
+    snapshot_path.parent.mkdir(parents=True, exist_ok=True)
+    temporary_path = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            mode="w",
+            encoding="utf-8",
+            newline="",
+            dir=snapshot_path.parent,
+            prefix=f".{snapshot_path.name}.",
+            suffix=".tmp",
+            delete=False,
+        ) as temporary_file:
+            temporary_path = Path(temporary_file.name)
+            refreshed.to_csv(temporary_file, index=False)
+            temporary_file.flush()
+            os.fsync(temporary_file.fileno())
+        os.replace(temporary_path, snapshot_path)
+    finally:
+        if temporary_path is not None and temporary_path.exists():
+            temporary_path.unlink()
+
+    logger.info(
+        "Updated current-season team snapshot: path=%s rows=%d latest=%s",
+        snapshot_path,
+        len(refreshed),
+        latest_game_date,
+    )
+    return latest_game_date
+
+
+def _set_team_results_metadata(
+    games,
+    source,
+    latest_game_date,
+    is_stale,
+    warning=None,
+):
+    games.attrs["source"] = source
+    games.attrs["latest_game_date"] = latest_game_date.isoformat()
+    games.attrs["is_stale"] = is_stale
+    games.attrs["warning"] = warning
+    return games
+
+
+def _today_eastern():
+    return datetime.now(EASTERN).date()
 
 
 
@@ -283,12 +594,32 @@ def team_strengths_for_date(current_games, previous_games, target_date):
 
     current_rates = rates(current_games)
     previous_rates = rates(previous_games)
+    current_is_stale = bool(
+        current_games is not None
+        and current_games.attrs.get("is_stale", False)
+    )
+    current_latest_date = (
+        current_games.attrs.get("latest_game_date")
+        if current_games is not None else None
+    )
+    current_source = "current-season results through prior day"
+    if current_is_stale:
+        latest_date = (
+            pd.Timestamp(current_latest_date).strftime("%b %d, %Y").replace(
+                " 0", " "
+            )
+            if current_latest_date else "an unknown date"
+        )
+        current_source = (
+            f"outdated current-season snapshot through {latest_date}"
+        )
+
     strengths = {}
     sources = {}
     for team_id in set(current_rates) | set(previous_rates):
         if team_id in current_rates:
             strengths[team_id] = current_rates[team_id]
-            sources[team_id] = "current-season results through prior day"
+            sources[team_id] = current_source
         else:
             strengths[team_id] = previous_rates[team_id]
             sources[team_id] = "previous-season baseline"
@@ -339,6 +670,25 @@ def build_pregame_predictions(
         home_probability = _probability(home_strength, away_strength)
         home_team = str(game["home_team"])
         away_team = str(game["away_team"])
+        home_source = sources.get(
+            home_id,
+            "neutral early-season baseline",
+        )
+        away_source = sources.get(
+            away_id,
+            "neutral early-season baseline",
+        )
+        if home_source == away_source:
+            rating_source = home_source
+        else:
+            stale_sources = sorted({
+                source
+                for source in (home_source, away_source)
+                if source.startswith("outdated current-season snapshot")
+            })
+            rating_source = "mixed team-record sources"
+            if stale_sources:
+                rating_source += "; includes " + ", ".join(stale_sources)
 
         rows.append({
             "game_id": str(game["game_id"]),
@@ -358,11 +708,7 @@ def build_pregame_predictions(
             "win_probability": max(home_probability, 1.0 - home_probability),
             "created_at": now.isoformat(),
             "model_version": MODEL_VERSION,
-            "rating_source": (
-                sources.get(home_id, "neutral early-season baseline")
-                if sources.get(home_id) == sources.get(away_id)
-                else "mixed team-record sources"
-            ),
+            "rating_source": rating_source,
             "status": "scheduled",
         })
 
