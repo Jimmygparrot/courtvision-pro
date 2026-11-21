@@ -1,0 +1,35 @@
+name: Diagnose NBA CDN access (temporary)
+
+on:
+  workflow_dispatch:
+
+permissions: {}
+
+jobs:
+  diagnose:
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    steps:
+      - name: Request NBA CDN scoreboard
+        shell: bash
+        run: |
+          url="https://cdn.nba.com/static/json/liveData/scoreboard/todaysScoreboard_00.json"
+          echo "Runner IP: $(curl -sS -m 10 https://api.ipify.org || echo unavailable)"
+          set +e
+          status=$(curl -sS -m 20 -o body.json -w '%{http_code} connect=%{time_connect}s total=%{time_total}s bytes=%{size_download}' "$url" 2>err.txt)
+          code=$?
+          set -e
+          echo "curl exit code: $code"
+          echo "HTTP result: $status"
+          echo "curl error: $(cat err.txt)"
+          {
+            echo "### NBA CDN diagnostic"
+            echo "- URL: $url"
+            echo "- curl exit code: $code"
+            echo "- HTTP result: $status"
+            echo "- curl error: $(cat err.txt)"
+          } >> "$GITHUB_STEP_SUMMARY"
+          if [ "$code" -eq 0 ]; then
+            head -c 300 body.json; echo
+          fi
+          [ "$code" -eq 0 ] && [ "${status%% *}" = "200" ]
