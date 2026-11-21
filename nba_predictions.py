@@ -2,7 +2,9 @@ from datetime import datetime, timedelta, timezone
 import logging
 from pathlib import Path
 import math
+import os
 import sqlite3
+import tempfile
 from zoneinfo import ZoneInfo
 
 import pandas as pd
@@ -12,6 +14,7 @@ logger = logging.getLogger(__name__)
 ROOT = Path(__file__).resolve().parent
 CURRENT_SEASON = "2026-27"
 PREVIOUS_SEASON = "2025-26"
+NBA_TEAM_COUNT = 30
 MODEL_VERSION = "pregame-win-rate-logistic-cross-season-v1"
 MODEL_COEFFICIENT = 4.1196
 MODEL_INTERCEPT = 0.1982
@@ -354,6 +357,177 @@ def _prepare_team_results(games):
 
     latest_game_date = dates.loc[valid_dates].max().date()
     return results, latest_game_date
+
+
+def _validate_complete_team_results(games):
+    required = {"GAME_ID", "TEAM_ID", "GAME_DATE", "WL"}
+    if games is None or games.empty or not required.issubset(games.columns):
+        raise ValueError(
+            "Team results are empty or missing required game identifiers."
+        )
+
+    win_loss = games["WL"].fillna("").astype(str).str.strip().str.upper()
+    invalid_outcomes = ~win_loss.isin(["", "W", "L"])
+    if invalid_outcomes.any():
+        raise ValueError("Team results contain invalid win/loss outcomes.")
+
+    completed = games.loc[win_loss.isin(["W", "L"])].copy()
+    if completed.empty:
+        raise ValueError("Team results contain no completed games.")
+
+    results, latest_game_date = _prepare_team_results(completed)
+    if len(results) != len(completed):
+        raise ValueError("Completed team results contain invalid game dates.")
+
+    dates = pd.to_datetime(
+        results["GAME_DATE"],
+        format="mixed",
+        errors="coerce",
+    )
+    if dates.isna().any():
+        raise ValueError("Completed team results contain invalid game dates.")
+    if latest_game_date > _today_eastern():
+        raise ValueError("Team results contain a game date in the future.")
+
+    team_ids = pd.to_numeric(results["TEAM_ID"], errors="coerce")
+    if (
+        team_ids.isna().any()
+        or (team_ids <= 0).any()
+        or (team_ids % 1 != 0).any()
+    ):
+        raise ValueError("Team results contain invalid team IDs.")
+
+    game_ids = pd.to_numeric(results["GAME_ID"], errors="coerce")
+    if (
+        game_ids.isna().any()
+        or (game_ids <= 0).any()
+        or (game_ids % 1 != 0).any()
+    ):
+        raise ValueError("Team results contain invalid game IDs.")
+
+    results["TEAM_ID"] = team_ids.astype("int64")
+    results["GAME_ID"] = game_ids.astype("int64").map(
+        lambda game_id: f"{game_id:010d}"
+    )
+    results["GAME_DATE"] = dates.dt.strftime("%Y-%m-%d")
+    results["WL"] = win_loss.loc[results.index]
+
+    if results.duplicated(["GAME_ID", "TEAM_ID"]).any():
+        raise ValueError("Team results contain duplicate team-game rows.")
+    if results["TEAM_ID"].nunique() != NBA_TEAM_COUNT:
+        raise ValueError("Team results do not cover all 30 NBA teams.")
+
+    for game_id, rows in results.groupby("GAME_ID", sort=False):
+        if (
+            len(rows) != 2
+            or rows["TEAM_ID"].nunique() != 2
+            or sorted(rows["WL"].tolist()) != ["L", "W"]
+            or rows["GAME_DATE"].nunique() != 1
+        ):
+            raise ValueError(
+                f"Completed game {game_id} has incomplete or inconsistent "
+                "team results."
+            )
+
+    return results, latest_game_date
+
+
+def refresh_current_season_team_snapshot(snapshot_path=None):
+    """Fetch and atomically replace the current-season results snapshot."""
+    if snapshot_path is None:
+        snapshot_path = (
+            ROOT
+            / "data"
+            / "historical"
+            / f"nba_games_{CURRENT_SEASON}.csv"
+        )
+    snapshot_path = Path(snapshot_path)
+
+    from nba_api.stats.endpoints import leaguegamelog
+
+    logger.info("Refreshing current-season team snapshot at %s", snapshot_path)
+    try:
+        api_games = leaguegamelog.LeagueGameLog(
+            player_or_team_abbreviation="T",
+            season=CURRENT_SEASON,
+            season_type_all_star="Regular Season",
+            timeout=60,
+        ).get_data_frames()[0]
+        refreshed, latest_game_date = _validate_complete_team_results(
+            api_games
+        )
+    except Exception:
+        logger.exception(
+            "Current-season refresh failed; leaving the existing snapshot "
+            "untouched at %s",
+            snapshot_path,
+        )
+        raise
+
+    if snapshot_path.exists():
+        try:
+            existing, existing_latest_date = _validate_complete_team_results(
+                pd.read_csv(snapshot_path)
+            )
+        except (
+            OSError,
+            pd.errors.EmptyDataError,
+            pd.errors.ParserError,
+            ValueError,
+        ) as error:
+            logger.warning(
+                "Existing team snapshot is invalid and will only be replaced "
+                "after a validated API refresh (%s: %s)",
+                type(error).__name__,
+                error,
+            )
+        else:
+            if latest_game_date < existing_latest_date:
+                raise ValueError(
+                    "Refreshed team results are older than the current "
+                    "snapshot."
+                )
+
+            old_pairs = set(zip(existing["GAME_ID"], existing["TEAM_ID"]))
+            new_pairs = set(zip(refreshed["GAME_ID"], refreshed["TEAM_ID"]))
+            if not old_pairs.issubset(new_pairs):
+                raise ValueError(
+                    "Refreshed team results omit previously saved "
+                    "team-game records."
+                )
+
+    refreshed = refreshed.sort_values(
+        ["GAME_DATE", "GAME_ID", "TEAM_ID"],
+        ascending=[False, False, True],
+    ).reset_index(drop=True)
+    snapshot_path.parent.mkdir(parents=True, exist_ok=True)
+    temporary_path = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            mode="w",
+            encoding="utf-8",
+            newline="",
+            dir=snapshot_path.parent,
+            prefix=f".{snapshot_path.name}.",
+            suffix=".tmp",
+            delete=False,
+        ) as temporary_file:
+            temporary_path = Path(temporary_file.name)
+            refreshed.to_csv(temporary_file, index=False)
+            temporary_file.flush()
+            os.fsync(temporary_file.fileno())
+        os.replace(temporary_path, snapshot_path)
+    finally:
+        if temporary_path is not None and temporary_path.exists():
+            temporary_path.unlink()
+
+    logger.info(
+        "Updated current-season team snapshot: path=%s rows=%d latest=%s",
+        snapshot_path,
+        len(refreshed),
+        latest_game_date,
+    )
+    return latest_game_date
 
 
 def _set_team_results_metadata(
