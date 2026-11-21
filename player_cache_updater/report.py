@@ -9,8 +9,8 @@ from .models import Failure
 from .schema import KEY_COLUMNS, LOCAL_COLUMNS, SEASON
 
 
-def ensure_scratch_directory(out_dir, protected):
-    """Refuse to write inside the repository's data or cache directories."""
+def ensure_scratch_directory(out_dir, protected, create=True):
+    """Refuse to use a directory inside the repository's data or cache dirs."""
     out_dir = Path(out_dir).resolve()
     for path in protected:
         path = Path(path).resolve()
@@ -18,7 +18,8 @@ def ensure_scratch_directory(out_dir, protected):
             raise ValueError(
                 f"Output directory {out_dir} must not be inside {path}."
             )
-    out_dir.mkdir(parents=True, exist_ok=True)
+    if create:
+        out_dir.mkdir(parents=True, exist_ok=True)
     return out_dir
 
 
@@ -84,6 +85,7 @@ def build_report(context):
         "cache_players_absent_from_source": context["absent_from_source"],
         "proposed_files_written": len(context["written"]),
         "proposed_file_problems": len(context["output_problems"]),
+        "plan_verification_problems": sum(len(p.problems) for p in plans),
     }
     details = {
         "source": context["source_info"],
@@ -118,7 +120,12 @@ def write_report(report, out_dir):
 def render_text(report, out_dir):
     summary = report["summary"]
     lines = [
-        "CourtVision Pro player cache DRY RUN (no cache files were modified)",
+        "CourtVision Pro player cache updater "
+        + (
+            "(APPLY mode)"
+            if report.get("apply", {}).get("mode") == "apply"
+            else "DRY RUN (no cache files were modified)"
+        ),
         f"Scratch directory: {out_dir}",
     ]
     source = report["source"]
@@ -154,9 +161,38 @@ def render_text(report, out_dir):
         ("cache_players_absent_from_source", "Cached players absent from source"),
         ("proposed_files_written", "Proposed CSVs written"),
         ("proposed_file_problems", "Proposed file self-check problems"),
+        ("plan_verification_problems", "Plan verification problems"),
     ]
     for key, label in labels:
         lines.append(f"{label}: {summary[key]}")
+    apply_info = report.get("apply")
+    if apply_info:
+        lines.append("")
+        lines.append(
+            f"Apply gate: {'PASS' if apply_info['gate_passed'] else 'FAIL'}; "
+            f"eligible files: {apply_info['files_eligible']}; "
+            f"new player files held back: "
+            f"{apply_info['new_player_files_held_back']}"
+        )
+        for blocker in apply_info["blockers"][:10]:
+            lines.append(f"  BLOCKER: {blocker}")
+        if apply_info["mode"] == "dry-run":
+            lines.append("Dry run only: no cache file was changed.")
+        elif apply_info.get("applied"):
+            lines.append(
+                f"APPLIED {apply_info['files_applied']} file(s) "
+                f"({apply_info['files_created']} created). "
+                f"Backup: {apply_info['backup_dir']}"
+            )
+            lines.append(
+                "Rollback: python -m player_cache_updater --rollback "
+                f"\"{apply_info['backup_dir']}\""
+            )
+        else:
+            lines.append(
+                "NOT APPLIED: "
+                + (apply_info.get("error") or "validation did not pass")
+            )
     if summary["validation_failure_reasons"]:
         lines.append("Validation failure reasons:")
         for reason, count in summary["validation_failure_reasons"].items():

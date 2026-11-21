@@ -48,6 +48,7 @@ class PlayerPlan:
     duplicates_removed: int = 0
     ids_normalized: int = 0
     proposed: Optional[pd.DataFrame] = None
+    problems: list = field(default_factory=list)
 
     @property
     def changed(self):

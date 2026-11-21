@@ -68,7 +68,34 @@ def plan_player(player_id, name, local, source_rows):
         kept = local.rows[~local.rows["Game_ID"].isin(replaced)]
         added = source_rows[source_rows["Game_ID"].isin(replaced)]
         plan.proposed = _sorted(pd.concat([kept, added], ignore_index=True))
+        plan.problems = verify_plan(local, plan, replaced)
     return plan
+
+
+def verify_plan(local, plan, replaced):
+    """Check that a proposal keeps every cached game and edits only planned ones."""
+    problems = []
+    proposed = plan.proposed
+    if proposed["Game_ID"].duplicated().any():
+        problems.append("proposal contains duplicate games")
+    if not (proposed["Player_ID"] == plan.player_id).all():
+        problems.append("proposal contains another player's rows")
+    expected = len(local.rows) + len(plan.new_games)
+    if len(proposed) != expected:
+        problems.append(
+            f"proposal has {len(proposed)} rows; expected {expected}"
+        )
+    proposed_rows = proposed.set_index("Game_ID", drop=False)
+    replaced = set(replaced)
+    for _, old_row in local.rows.iterrows():
+        game_id = old_row["Game_ID"]
+        if game_id not in proposed_rows.index:
+            problems.append(f"cached game {game_id} would be removed")
+        elif game_id not in replaced and _differences(
+            old_row, proposed_rows.loc[game_id]
+        ):
+            problems.append(f"unplanned change to cached game {game_id}")
+    return problems
 
 
 def _sorted(rows):

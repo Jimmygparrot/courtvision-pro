@@ -1,4 +1,4 @@
-"""Command line entry point for the player cache dry run."""
+"""Command line entry point for the player cache updater."""
 
 import argparse
 import tempfile
@@ -8,7 +8,7 @@ from zoneinfo import ZoneInfo
 
 import pandas as pd
 
-from . import compare, normalize, report, source
+from . import apply, compare, normalize, report, source
 from .models import LocalFileError, SourceError
 from .schema import SEASON, SEASON_START_YEAR, SOURCE_URL
 
@@ -20,8 +20,9 @@ def parse_args(argv=None):
     parser = argparse.ArgumentParser(
         prog="python -m player_cache_updater",
         description=(
-            "Dry run: build proposed player cache CSVs from the "
-            "sportsdataverse game logs. Never writes to data/nba_cache."
+            "Build proposed player cache CSVs from the sportsdataverse game "
+            "logs. Dry run by default: nothing is written to the cache "
+            "unless --apply is given and every validation passes."
         ),
     )
     parser.add_argument("--url", default=SOURCE_URL)
@@ -42,6 +43,32 @@ def parse_args(argv=None):
         help="Scratch directory (default: a new system temp directory).",
     )
     parser.add_argument("--timeout", type=float, default=60)
+    parser.add_argument(
+        "--apply",
+        action="store_true",
+        help="Replace cache files with the validated proposals (after backup).",
+    )
+    parser.add_argument(
+        "--include-new-players",
+        action="store_true",
+        help="With --apply, also create cache files for players without one.",
+    )
+    parser.add_argument(
+        "--backup-dir",
+        type=Path,
+        help="Backup directory for --apply (default: <out-dir>/backup).",
+    )
+    parser.add_argument(
+        "--rollback",
+        type=Path,
+        metavar="BACKUP_DIR",
+        help="Restore the cache from a backup made by --apply, then exit.",
+    )
+    parser.add_argument(
+        "--force-rollback",
+        action="store_true",
+        help="Restore even files modified after the apply.",
+    )
     return parser.parse_args(argv)
 
 
@@ -120,18 +147,20 @@ def run(args):
         )
 
     written = []
+    proposed_files = {}
     output_problems = []
     for plan in plans:
         if not plan.changed:
             continue
         path = report.write_proposed(plan, out_dir)
         written.append(path)
+        proposed_files[plan.player_id] = (plan, path)
         output_problems.extend(
             f"{path.name}: {problem}"
             for problem in report.validate_proposed_file(path)
         )
 
-    result = report.build_report({
+    context = {
         "plans": plans,
         "failures": failures,
         "source_rows": normalized.raw_rows,
@@ -147,16 +176,92 @@ def run(args):
         "output_problems": output_problems,
         "source_info": source_info,
         "warnings": warnings,
-    })
+    }
+    result = report.build_report(context)
+
+    targets = {
+        player_id: path
+        for player_id, (plan, path) in proposed_files.items()
+        if plan.existing_file or args.include_new_players
+    }
+    held_back = len(proposed_files) - len(targets)
+    blockers = apply.gate_problems(context)
+    result["apply"] = {
+        "mode": "apply" if args.apply else "dry-run",
+        "gate_passed": not blockers,
+        "blockers": blockers[:20],
+        "files_eligible": len(targets),
+        "new_player_files_held_back": held_back,
+    }
+
+    status = 0 if not output_problems else 1
+    if args.apply:
+        status = apply_validated(args, context, out_dir, targets, blockers, result)
     report.write_report(result, out_dir)
     print(report.render_text(result, out_dir))
-    return 0 if not output_problems else 1
+    return status
+
+
+def apply_validated(args, context, out_dir, targets, blockers, result):
+    info = result["apply"]
+    if blockers:
+        info["applied"] = False
+        return 3
+
+    backup_dir = args.backup_dir or out_dir / "backup"
+    report.ensure_scratch_directory(
+        backup_dir, [ROOT / "data", args.cache_dir], create=False
+    )
+    try:
+        manifest = apply.apply_changes(targets, args.cache_dir, backup_dir)
+    except apply.ApplyError as error:
+        info.update(applied=False, error=str(error))
+        return 4
+
+    problems = []
+    for entry in manifest["entries"]:
+        path = args.cache_dir / entry["file"]
+        problems.extend(
+            f"{path.name}: {problem}"
+            for problem in report.validate_proposed_file(path)
+        )
+    info.update(
+        applied=True,
+        backup_dir=str(Path(backup_dir).resolve()),
+        files_applied=len(manifest["entries"]),
+        files_created=sum(not entry["existed"] for entry in manifest["entries"]),
+        post_apply_problems=problems,
+    )
+    if problems:
+        rolled_back = apply.rollback(backup_dir, args.cache_dir, force=True)
+        info.update(applied=False, rolled_back=rolled_back)
+        return 4
+    return 0
+
+
+def run_rollback(args):
+    outcome = apply.rollback(
+        args.rollback, args.cache_dir, force=args.force_rollback
+    )
+    print(
+        f"Rollback complete: restored {outcome['restored']}, removed "
+        f"{outcome['removed']} created file(s)."
+    )
+    if outcome["skipped"]:
+        print(
+            "Skipped (modified since the apply; use --force-rollback): "
+            + ", ".join(outcome["skipped"])
+        )
+        return 1
+    return 0
 
 
 def main(argv=None):
     args = parse_args(argv)
     try:
+        if args.rollback:
+            return run_rollback(args)
         return run(args)
-    except (SourceError, ValueError) as error:
-        print(f"DRY RUN FAILED: {error}")
+    except (SourceError, ValueError, apply.ApplyError) as error:
+        print(f"UPDATER FAILED: {error}")
         return 2
