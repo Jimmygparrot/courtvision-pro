@@ -1,0 +1,46 @@
+name: Refresh current-season NBA team results
+
+on:
+  schedule:
+    - cron: "0 12 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: refresh-nba-team-results
+  cancel-in-progress: false
+
+jobs:
+  refresh:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Check out the test branch
+        uses: actions/checkout@v4
+        with:
+          ref: nba-game-predictor
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+
+      - name: Install refresh dependencies
+        run: python -m pip install pandas==2.3.3 nba_api==1.12.0
+
+      - name: Refresh and validate team results
+        run: python refresh_nba_team_results.py
+
+      - name: Commit snapshot when it changes
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add data/historical/nba_games_2026-27.csv
+          if git diff --cached --quiet; then
+            echo "Current-season team snapshot is unchanged."
+            exit 0
+          fi
+          git commit -m "Update current-season NBA team results"
+          git push origin HEAD:nba-game-predictor
