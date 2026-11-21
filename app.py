@@ -1,9 +1,13 @@
+import logging
+
 from nba_defense import get_defense_factors
 import streamlit as st
 import pandas as pd
 from nba_stats import get_player_id, get_player_games
 import plotly.express as px
 from datetime import datetime, timedelta, timezone
+
+logger = logging.getLogger(__name__)
 
 st.set_page_config(
     page_title="CourtVision Pro",
@@ -130,6 +134,10 @@ if dashboard_view in {"Game winners", "Prediction history"}:
             results = load_current_season_team_games()
             return results, results.attrs.get("warning")
         except Exception as error:
+            logger.exception(
+                "Current-season team-results loader failed; returning no "
+                "team records to the prediction model."
+            )
             return (
                 pd.DataFrame(),
                 "Current-season results are unavailable; predictions use "
@@ -167,6 +175,21 @@ if dashboard_view in {"Game winners", "Prediction history"}:
                 "pregame predictions for those games are withheld."
             )
         current_results, results_warning = cached_team_game_logs()
+        if current_results.empty:
+            logger.warning(
+                "Game Winners team-results cache returned no rows; "
+                "loader_warning=%s",
+                results_warning,
+            )
+        else:
+            logger.info(
+                "Game Winners team-results cache returned: "
+                "rows=%d latest=%s stale=%s source=%s",
+                len(current_results),
+                current_results.attrs.get("latest_game_date"),
+                current_results.attrs.get("is_stale"),
+                current_results.attrs.get("source"),
+            )
         if results_warning:
             st.warning(results_warning)
         previous_results = load_previous_season_team_games()

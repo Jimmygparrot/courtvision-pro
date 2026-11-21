@@ -1,4 +1,5 @@
 from datetime import datetime, timedelta, timezone
+import logging
 from pathlib import Path
 import math
 import sqlite3
@@ -7,6 +8,7 @@ from zoneinfo import ZoneInfo
 import pandas as pd
 
 
+logger = logging.getLogger(__name__)
 ROOT = Path(__file__).resolve().parent
 CURRENT_SEASON = "2026-27"
 PREVIOUS_SEASON = "2025-26"
@@ -229,18 +231,40 @@ def load_current_season_team_games():
             snapshot_games, snapshot_latest_date = _prepare_team_results(
                 pd.read_csv(snapshot)
             )
+            logger.info(
+                "Loaded current-season team snapshot: path=%s rows=%d latest=%s",
+                snapshot,
+                len(snapshot_games),
+                snapshot_latest_date,
+            )
         except (
             OSError,
             pd.errors.EmptyDataError,
             pd.errors.ParserError,
             ValueError,
-        ):
+        ) as error:
+            logger.warning(
+                "Rejected current-season team snapshot at %s (%s: %s)",
+                snapshot,
+                type(error).__name__,
+                error,
+                exc_info=True,
+            )
             snapshot_games = None
             snapshot_latest_date = None
+    else:
+        logger.error(
+            "Current-season team snapshot is missing: path=%s",
+            snapshot,
+        )
 
     if snapshot_games is not None:
         age = _today_eastern() - snapshot_latest_date
         if timedelta(0) <= age <= timedelta(days=1):
+            logger.info(
+                "Using fresh current-season team snapshot through %s",
+                snapshot_latest_date,
+            )
             return _set_team_results_metadata(
                 snapshot_games,
                 source="saved current-season snapshot",
@@ -248,6 +272,11 @@ def load_current_season_team_games():
                 is_stale=False,
             )
 
+    logger.info(
+        "Refreshing current-season team results from the NBA API; "
+        "valid_snapshot=%s",
+        snapshot_games is not None,
+    )
     from nba_api.stats.endpoints import leaguegamelog
 
     try:
@@ -266,6 +295,14 @@ def load_current_season_team_games():
         )
     except Exception as error:
         if snapshot_games is None:
+            logger.error(
+                "NBA API refresh failed and no valid current-season snapshot "
+                "is available at %s (%s: %s)",
+                snapshot,
+                type(error).__name__,
+                error,
+                exc_info=True,
+            )
             raise RuntimeError(
                 "Current-season NBA team results are unavailable "
                 f"({type(error).__name__}); no valid saved snapshot exists."
@@ -273,6 +310,15 @@ def load_current_season_team_games():
 
         latest_date = snapshot_latest_date.strftime("%b %d, %Y").replace(
             " 0", " "
+        )
+        logger.warning(
+            "NBA API refresh failed (%s: %s); using current-season team "
+            "snapshot through %s at %s",
+            type(error).__name__,
+            error,
+            latest_date,
+            snapshot,
+            exc_info=True,
         )
         warning = (
             "The NBA API refresh failed "

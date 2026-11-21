@@ -1,4 +1,5 @@
 import math
+import logging
 from datetime import date, datetime, timezone
 
 import pandas as pd
@@ -203,7 +204,7 @@ def test_stale_team_snapshot_uses_successful_api_refresh(
 
 
 def test_stale_team_snapshot_is_used_and_warned_when_api_times_out(
-    monkeypatch, tmp_path
+    monkeypatch, tmp_path, caplog
 ):
     write_team_snapshot(tmp_path, "2026-11-18")
     monkeypatch.setattr(nba_predictions, "ROOT", tmp_path)
@@ -218,7 +219,8 @@ def test_stale_team_snapshot_is_used_and_warned_when_api_times_out(
 
     monkeypatch.setattr(leaguegamelog, "LeagueGameLog", unavailable)
 
-    results = load_current_season_team_games()
+    with caplog.at_level(logging.WARNING, logger="nba_predictions"):
+        results = load_current_season_team_games()
     _, sources = team_strengths_for_date(
         results,
         pd.DataFrame(),
@@ -235,6 +237,48 @@ def test_stale_team_snapshot_is_used_and_warned_when_api_times_out(
     assert sources["1"] == (
         "outdated current-season snapshot through Nov 18, 2026"
     )
+    assert "using current-season team snapshot through Nov 18, 2026" in (
+        caplog.text
+    )
+
+
+def test_rejected_snapshot_and_api_timeout_are_logged(
+    monkeypatch, tmp_path, caplog
+):
+    snapshot = (
+        tmp_path
+        / "data"
+        / "historical"
+        / f"nba_games_{nba_predictions.CURRENT_SEASON}.csv"
+    )
+    snapshot.parent.mkdir(parents=True)
+    pd.DataFrame([{
+        "TEAM_ID": 1,
+        "GAME_DATE": "2026-11-18",
+        "WL": "N/A",
+    }]).to_csv(snapshot, index=False)
+    monkeypatch.setattr(nba_predictions, "ROOT", tmp_path)
+    monkeypatch.setattr(
+        nba_predictions,
+        "_today_eastern",
+        lambda: date(2026, 11, 21),
+    )
+
+    def unavailable(**kwargs):
+        raise TimeoutError("NBA API unavailable")
+
+    monkeypatch.setattr(leaguegamelog, "LeagueGameLog", unavailable)
+
+    with caplog.at_level(logging.WARNING, logger="nba_predictions"):
+        with pytest.raises(
+            RuntimeError,
+            match="no valid saved snapshot exists",
+        ):
+            load_current_season_team_games()
+
+    assert str(snapshot) in caplog.text
+    assert "no valid completed games" in caplog.text
+    assert "no valid current-season snapshot is available" in caplog.text
 
 
 def test_pregame_model_uses_only_prior_date_records():
