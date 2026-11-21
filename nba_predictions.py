@@ -219,13 +219,25 @@ def load_todays_matchups(game_date, schedule_path=None):
         )
 
 def load_current_season_team_games():
+    """Load current NBA results, refreshing an outdated local snapshot."""
+    from datetime import datetime, timedelta
+
     snapshot = ROOT / "data" / "historical" / f"nba_games_{CURRENT_SEASON}.csv"
 
     if snapshot.exists():
         games = pd.read_csv(snapshot)
         games = games[games["WL"].isin(["W", "L"])].copy()
+
         if not games.empty:
-            return games
+            latest_game = pd.to_datetime(
+                games["GAME_DATE"], errors="coerce"
+            ).max()
+
+            if pd.notna(latest_game):
+                age = datetime.now().date() - latest_game.date()
+
+                if age <= timedelta(days=1):
+                    return games
 
     from nba_api.stats.endpoints import leaguegamelog
 

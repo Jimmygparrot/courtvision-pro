@@ -1,6 +1,10 @@
 from pathlib import Path
 import streamlit as st
-from nba_api.stats.endpoints import leaguedashteamstats
+
+# NBA Stats uses "LA Clippers"; the schedule and roster use "Los Angeles Clippers".
+TEAM_NAME_ALIASES = {
+    "Los Angeles Clippers": "LA Clippers",
+}
 
 
 @st.cache_data(ttl=300)
@@ -31,7 +35,8 @@ def get_defense_factors(opponent, season="2026-27"):
     if df is None:
         return None
 
-    row = df[df["TEAM_NAME"] == opponent]
+    lookup_name = TEAM_NAME_ALIASES.get(opponent, opponent)
+    row = df[df["TEAM_NAME"] == lookup_name]
 
     if row.empty:
         return None
