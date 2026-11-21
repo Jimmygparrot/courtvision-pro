@@ -1,0 +1,67 @@
+name: Diagnose sportsdataverse player logs (temporary)
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - nba-game-predictor
+    paths:
+      - .github/workflows/diagnose-sdv-player-logs.yml
+
+permissions: {}
+
+jobs:
+  diagnose:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Download and inspect player_game_logs_2027.csv
+        shell: bash
+        run: |
+          url="https://github.com/sportsdataverse/sportsdataverse-data/releases/download/nba_stats_player_game_logs/player_game_logs_2027.csv"
+          set +e
+          result=$(curl -sSL -m 60 --retry 2 -o logs.csv -w '%{http_code} final_url=%{url_effective} total=%{time_total}s bytes=%{size_download}' "$url" 2>err.txt)
+          code=$?
+          set -e
+          echo "curl exit code: $code"
+          echo "HTTP result: $result"
+          echo "curl error: $(cat err.txt)"
+          {
+            echo "### sportsdataverse player logs diagnostic"
+            echo "- curl exit code: $code"
+            echo "- HTTP result: $result"
+            echo "- curl error: $(cat err.txt)"
+          } >> "$GITHUB_STEP_SUMMARY"
+          [ "$code" -eq 0 ] && [ "${result%% *}" = "200" ]
+          ls -l logs.csv
+          python3 - <<'PY' | tee -a "$GITHUB_STEP_SUMMARY"
+          import csv
+          from datetime import date
+
+          required = [
+              "player_id", "game_id", "game_date", "matchup", "wl", "min",
+              "fgm", "fga", "fg_pct", "fg3m", "fg3a", "fg3_pct", "ftm", "fta",
+              "ft_pct", "oreb", "dreb", "reb", "ast", "stl", "blk", "tov",
+              "pf", "pts", "plus_minus",
+          ]
+          with open("logs.csv", newline="", encoding="utf-8") as handle:
+              reader = csv.DictReader(handle)
+              columns = reader.fieldnames or []
+              rows = list(reader)
+
+          missing = [name for name in required if name not in columns]
+          dates = sorted(row["game_date"] for row in rows if row.get("game_date"))
+          white = [row for row in rows if row.get("player_id", "").strip() in ("1628401", "1628401.0")]
+          game_ids = {row["game_id"] for row in rows if row.get("game_id")}
+          bad_ids = [g for g in game_ids if len(g) != 10]
+
+          print(f"- rows: {len(rows)}; columns: {len(columns)}")
+          print(f"- missing required columns: {missing or 'none'}")
+          print(f"- latest game_date: {dates[-1] if dates else 'n/a'} (today UTC: {date.today()})")
+          print(f"- distinct games: {len(game_ids)}; game_ids not 10 chars: {len(bad_ids)}")
+          print(f"- Derrick White (1628401) rows: {len(white)}")
+          for row in sorted(white, key=lambda r: r["game_date"], reverse=True)[:3]:
+              print(f"  - {row['game_date']} {row['game_id']} {row['matchup']} {row['wl']} MIN={row['min']} PTS={row['pts']} REB={row['reb']} AST={row['ast']}")
+          if missing or not dates or not white:
+              raise SystemExit(1)
+          PY
