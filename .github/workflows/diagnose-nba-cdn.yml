@@ -2,6 +2,11 @@ name: Diagnose NBA CDN access (temporary)
 
 on:
   workflow_dispatch:
+  push:
+    branches:
+      - nba-game-predictor
+    paths:
+      - .github/workflows/diagnose-nba-cdn.yml
 
 permissions: {}
 
