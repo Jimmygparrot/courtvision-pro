@@ -127,7 +127,8 @@ if dashboard_view in {"Game winners", "Prediction history"}:
     @st.cache_data(ttl=3600, max_entries=2, show_spinner=False)
     def cached_team_game_logs():
         try:
-            return load_current_season_team_games(), None
+            results = load_current_season_team_games()
+            return results, results.attrs.get("warning")
         except Exception as error:
             return (
                 pd.DataFrame(),
@@ -178,67 +179,161 @@ if dashboard_view in {"Game winners", "Prediction history"}:
         save_prediction_snapshots(fresh_predictions)
         history = read_prediction_history()
         if not history.empty:
-            today_predictions = history[
+            saved_predictions = history[
                 history["game_date"] == str(today)
             ].copy()
         else:
-            today_predictions = pd.DataFrame()
+            saved_predictions = pd.DataFrame()
 
-        if today_predictions.empty:
-            st.info(
-                "No pregame predictions are available for today. "
-                "Predictions are not reconstructed after tipoff."
+        st.subheader("Current Prediction")
+        latest_game_date = current_results.attrs.get("latest_game_date")
+        if latest_game_date:
+            latest_game = pd.Timestamp(latest_game_date).date()
+            latest_game_label = pd.Timestamp(latest_game).strftime(
+                "%b %d, %Y"
+            ).replace(" 0", " ")
+            data_age = (today - latest_game).days
+            if current_results.attrs.get("is_stale") is True:
+                freshness = "stale saved snapshot"
+            elif data_age > 1:
+                freshness = "stale source data"
+            elif data_age < 0:
+                freshness = "freshness unknown"
+            elif current_results.attrs.get("is_stale") is False:
+                freshness = "fresh source data"
+            else:
+                freshness = "freshness unknown"
+            source = current_results.attrs.get("source")
+            source_label = f" ({source})" if source else ""
+            st.caption(
+                f"Team statistics used: through {latest_game_label} — "
+                f"{freshness}{source_label}."
+            )
+        elif current_results.empty:
+            st.caption(
+                "Team statistics are unavailable; prior-season or neutral "
+                "ratings may be used."
             )
         else:
             st.caption(
-                f"Model: {MODEL_VERSION} · Schedule: {schedule_source}. "
-                "Each saved prediction is an immutable pregame snapshot."
+                "The latest team-statistics date and freshness are "
+                "unavailable."
             )
-            table = today_predictions.rename(columns={
+
+        def prediction_display_table(
+            predictions,
+            label,
+            timestamp_label,
+        ):
+            table = predictions[[
+                "game_date",
+                "away_team",
+                "home_team",
+                "predicted_winner",
+                "home_win_probability",
+                "away_win_probability",
+                "created_at",
+                "tipoff_utc",
+            ]].copy()
+            table["created_at"] = table["created_at"].map(
+                format_eastern_datetime
+            )
+            table["tipoff_utc"] = table["tipoff_utc"].map(
+                format_eastern_datetime
+            )
+            table["home_win_probability"] = table[
+                "home_win_probability"
+            ].map(lambda value: f"{value:.1%}")
+            table["away_win_probability"] = table[
+                "away_win_probability"
+            ].map(lambda value: f"{value:.1%}")
+            return table.rename(columns={
                 "game_date": "Game date",
-                "home_team": "Home",
                 "away_team": "Away",
-                "predicted_winner": "Predicted winner",
-                "home_win_probability": "Home win probability",
-                "away_win_probability": "Away win probability",
-                "rating_source": "Rating data",
+                "home_team": "Home",
+                "predicted_winner": f"{label} predicted winner",
+                "home_win_probability": (
+                    f"{label} home win probability"
+                ),
+                "away_win_probability": (
+                    f"{label} away win probability"
+                ),
+                "created_at": timestamp_label,
+                "tipoff_utc": "Game Tipoff (ET)",
             })
-            table["Prediction timestamp (ET)"] = today_predictions[
-                "created_at"
-            ].map(format_eastern_datetime)
-            table["Game Tipoff (ET)"] = today_predictions[
-                "tipoff_utc"
-            ].map(format_eastern_datetime)
-            table["Home win probability"] = table[
-                "Home win probability"
-            ].map(lambda value: f"{value:.1%}")
-            table["Away win probability"] = table[
-                "Away win probability"
-            ].map(lambda value: f"{value:.1%}")
-            st.dataframe(
-                table[[
-                    "Game date",
-                    "Away",
-                    "Home",
-                    "Predicted winner",
-                    "Home win probability",
-                    "Away win probability",
-                    "Prediction timestamp (ET)",
-                    "Game Tipoff (ET)",
-                ]],
-                hide_index=True,
-                alt="Today's saved pregame game winner predictions",
+
+        if fresh_predictions.empty:
+            if saved_predictions.empty:
+                st.info(
+                    "No current or original pregame predictions are "
+                    "available. Predictions are not reconstructed after "
+                    "tipoff."
+                )
+            else:
+                st.info(
+                    "No current pregame predictions are available. "
+                    "Predictions are not reconstructed after tipoff."
+                )
+        else:
+            st.caption(
+                f"Model: {MODEL_VERSION} · Schedule: {schedule_source}. "
+                "These probabilities are calculated from the latest "
+                "available team results."
             )
-            if today_predictions["rating_source"].str.contains(
+            table = prediction_display_table(
+                fresh_predictions,
+                "Current",
+                "Calculated at (ET)",
+            )
+            st.dataframe(
+                table,
+                hide_index=True,
+                alt="Current NBA matchup win probabilities",
+            )
+
+        if saved_predictions.empty:
+            if not fresh_predictions.empty:
+                st.caption("No original saved prediction exists for these games.")
+        else:
+            st.subheader("Original Saved Prediction")
+            st.caption(
+                "These are immutable pregame snapshots from SQLite; "
+                "their probabilities are not replaced by current calculations."
+            )
+            table = prediction_display_table(
+                saved_predictions,
+                "Original saved",
+                "Original saved at (ET)",
+            )
+            st.dataframe(
+                table,
+                hide_index=True,
+                alt="Original saved pregame NBA predictions",
+            )
+            if saved_predictions["rating_source"].fillna("").str.contains(
                 "previous-season|neutral", regex=True
             ).any():
                 st.caption(
-                    "Some team ratings use prior-season or neutral records "
-                    "because current-season results were not available."
+                    "The original saved prediction used prior-season or "
+                    "neutral team ratings."
+                )
+            outdated_sources = sorted(
+                source
+                for source in saved_predictions["rating_source"]
+                .fillna("")
+                .astype(str)
+                .unique()
+                if "outdated current-season snapshot" in source
+            )
+            if outdated_sources:
+                st.warning(
+                    "These saved predictions use outdated team results: "
+                    + "; ".join(outdated_sources)
+                    + ". The original saved probabilities are unchanged."
                 )
             try:
                 report = build_prediction_pdf(
-                    today_predictions,
+                    saved_predictions,
                     today,
                 )
                 st.download_button(

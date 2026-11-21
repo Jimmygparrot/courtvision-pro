@@ -1,20 +1,24 @@
 import math
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 
 import pandas as pd
 import pytest
+from nba_api.stats.endpoints import leaguegamelog
 
 from backtesting.nba_daily_predictions import build_prediction_pdf
+import nba_predictions
 from nba_predictions import (
     _local_schedule,
     _scoreboard_schedule,
     build_pregame_predictions,
     extract_completed_results,
     format_eastern_datetime,
+    load_current_season_team_games,
     load_todays_matchups,
     prediction_accuracy,
     read_prediction_history,
     save_prediction_snapshots,
+    team_strengths_for_date,
     update_prediction_results,
 )
 
@@ -101,6 +105,136 @@ def schedule_rows():
             "status": "scheduled",
         },
     ])
+
+
+def team_result_rows(game_date):
+    return pd.DataFrame([
+        {
+            "TEAM_ID": 1,
+            "GAME_DATE": game_date,
+            "WL": "W",
+        },
+        {
+            "TEAM_ID": 2,
+            "GAME_DATE": game_date,
+            "WL": "L",
+        },
+    ])
+
+
+def write_team_snapshot(root, game_date):
+    snapshot = (
+        root
+        / "data"
+        / "historical"
+        / f"nba_games_{nba_predictions.CURRENT_SEASON}.csv"
+    )
+    snapshot.parent.mkdir(parents=True)
+    team_result_rows(game_date).to_csv(snapshot, index=False)
+    return snapshot
+
+
+def test_fresh_team_snapshot_is_used_without_api_request(
+    monkeypatch, tmp_path
+):
+    write_team_snapshot(tmp_path, "2026-11-20")
+    monkeypatch.setattr(nba_predictions, "ROOT", tmp_path)
+    monkeypatch.setattr(
+        nba_predictions,
+        "_today_eastern",
+        lambda: date(2026, 11, 21),
+    )
+
+    def unexpected(**kwargs):
+        raise AssertionError("A fresh team snapshot should not call the API")
+
+    monkeypatch.setattr(leaguegamelog, "LeagueGameLog", unexpected)
+
+    results = load_current_season_team_games()
+
+    assert results["GAME_DATE"].tolist() == [
+        "2026-11-20",
+        "2026-11-20",
+    ]
+    assert results.attrs["source"] == "saved current-season snapshot"
+    assert results.attrs["latest_game_date"] == "2026-11-20"
+    assert results.attrs["is_stale"] is False
+    assert results.attrs["warning"] is None
+
+
+def test_stale_team_snapshot_uses_successful_api_refresh(
+    monkeypatch, tmp_path
+):
+    write_team_snapshot(tmp_path, "2026-11-18")
+    monkeypatch.setattr(nba_predictions, "ROOT", tmp_path)
+    monkeypatch.setattr(
+        nba_predictions,
+        "_today_eastern",
+        lambda: date(2026, 11, 21),
+    )
+    api_results = team_result_rows("2026-11-20")
+    calls = []
+
+    class LeagueGameLog:
+        def __init__(self, **kwargs):
+            calls.append(kwargs)
+
+        def get_data_frames(self):
+            return [api_results]
+
+    monkeypatch.setattr(leaguegamelog, "LeagueGameLog", LeagueGameLog)
+
+    results = load_current_season_team_games()
+
+    assert calls == [{
+        "player_or_team_abbreviation": "T",
+        "season": "2026-27",
+        "season_type_all_star": "Regular Season",
+        "timeout": 30,
+    }]
+    assert results["GAME_DATE"].tolist() == [
+        "2026-11-20",
+        "2026-11-20",
+    ]
+    assert results.attrs["source"] == "NBA API"
+    assert results.attrs["latest_game_date"] == "2026-11-20"
+    assert results.attrs["is_stale"] is False
+    assert results.attrs["warning"] is None
+
+
+def test_stale_team_snapshot_is_used_and_warned_when_api_times_out(
+    monkeypatch, tmp_path
+):
+    write_team_snapshot(tmp_path, "2026-11-18")
+    monkeypatch.setattr(nba_predictions, "ROOT", tmp_path)
+    monkeypatch.setattr(
+        nba_predictions,
+        "_today_eastern",
+        lambda: date(2026, 11, 21),
+    )
+
+    def unavailable(**kwargs):
+        raise TimeoutError("NBA API unavailable")
+
+    monkeypatch.setattr(leaguegamelog, "LeagueGameLog", unavailable)
+
+    results = load_current_season_team_games()
+    _, sources = team_strengths_for_date(
+        results,
+        pd.DataFrame(),
+        "2026-11-21",
+    )
+
+    assert results["GAME_DATE"].tolist() == [
+        "2026-11-18",
+        "2026-11-18",
+    ]
+    assert results.attrs["is_stale"] is True
+    assert "TimeoutError" in results.attrs["warning"]
+    assert "Nov 18, 2026" in results.attrs["warning"]
+    assert sources["1"] == (
+        "outdated current-season snapshot through Nov 18, 2026"
+    )
 
 
 def test_pregame_model_uses_only_prior_date_records():
