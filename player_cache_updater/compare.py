@@ -47,6 +47,7 @@ def plan_player(player_id, name, local, source_rows):
         return plan
 
     cached = local.rows.set_index("Game_ID", drop=False)
+    plan.local_latest = local.rows["_date"].max()
     plan.duplicates_removed = local.duplicates_removed
     plan.ids_normalized = local.ids_normalized
 

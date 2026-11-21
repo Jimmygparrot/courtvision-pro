@@ -3,7 +3,7 @@ import json
 import pandas as pd
 import pytest
 
-from player_cache_updater import cli, compare, normalize
+from player_cache_updater import cli, compare, normalize, staging
 from player_cache_updater.models import SourceError
 from player_cache_updater.schema import LOCAL_COLUMNS, SOURCE_TO_LOCAL
 
@@ -192,19 +192,37 @@ def test_source_missing_columns_is_fatal():
 WHITE, TATUM, NEWBIE = 1628401, 1628369, 1700001
 
 
-def make_workspace(tmp_path, bad_source_row=False):
+def make_workspace(
+    tmp_path,
+    bad_source_row=False,
+    newer_cached_game=False,
+    absent_cached_player=False,
+    correct_white=False,
+):
     cache_dir = tmp_path / "cache"
     cache_dir.mkdir()
-    local_frame(
+    white_cached = [
         source_row(game_id="0022600001", date="2026-10-20", player_id=WHITE)
-    ).to_csv(cache_dir / f"{WHITE}.csv", index=False)
+    ]
+    if newer_cached_game:
+        white_cached.append(
+            source_row(game_id="0022600099", date="2026-11-05", player_id=WHITE)
+        )
+    local_frame(*white_cached).to_csv(cache_dir / f"{WHITE}.csv", index=False)
     local_frame(
         source_row(game_id="22600002", date="2026-10-21", player_id=TATUM),
         source_row(game_id="0022600002", date="2026-10-21", player_id=TATUM),
     ).to_csv(cache_dir / f"{TATUM}.csv", index=False)
+    if absent_cached_player:
+        local_frame(
+            source_row(game_id="0022600003", date="2026-10-22", player_id=1600001)
+        ).to_csv(cache_dir / "1600001.csv", index=False)
 
     rows = [
-        source_row(game_id="0022600001", date="2026-10-20", player_id=WHITE),
+        source_row(
+            game_id="0022600001", date="2026-10-20", player_id=WHITE,
+            **({"min": 32} if correct_white else {}),
+        ),
         source_row(game_id="0022600005", date="2026-10-25", player_id=WHITE),
         source_row(game_id="0022600002", date="2026-10-21", player_id=TATUM),
         source_row(game_id="0022600006", date="2026-10-26", player_id=TATUM),
@@ -297,3 +315,50 @@ def test_failure_during_apply_restores_every_file(tmp_path, monkeypatch):
 
     assert cli.main(base + ["--apply"]) == 4
     assert snapshot(cache_dir) == original
+
+
+@pytest.mark.parametrize("workspace_options, extra_args", [
+    ({"newer_cached_game": True}, []),
+    ({"absent_cached_player": True}, ["--min-player-coverage", "0.9"]),
+    ({"correct_white": True}, ["--max-corrected-records", "0"]),
+])
+def test_automation_guards_block_incomplete_or_suspicious_sources(
+    tmp_path, workspace_options, extra_args
+):
+    cache_dir, base = make_workspace(tmp_path, **workspace_options)
+    original = snapshot(cache_dir)
+
+    assert cli.main(base + ["--apply"] + extra_args) == 3
+
+    assert snapshot(cache_dir) == original
+    info = json.loads((tmp_path / "scratch" / "report.json").read_text())["apply"]
+    assert info["gate_passed"] is False and info["applied"] is False
+
+
+def test_apply_with_nothing_to_change_succeeds_and_leaves_files_alone(tmp_path):
+    cache_dir, base = make_workspace(tmp_path)
+    assert cli.main(base + ["--apply"]) == 0
+    updated = snapshot(cache_dir)
+
+    second = base[:-2] + ["--out-dir", str(tmp_path / "scratch2")]
+    assert cli.main(second + ["--apply", "--min-player-coverage", "0.9"]) == 0
+
+    assert snapshot(cache_dir) == updated
+    info = json.loads((tmp_path / "scratch2" / "report.json").read_text())["apply"]
+    assert info["applied"] is True and info["files_applied"] == 0
+
+
+def test_staging_guard_accepts_only_modified_existing_player_csvs():
+    assert staging.unexpected_changes(
+        ["M  data/nba_cache/2026-27/1628401.csv"]
+    ) == []
+    for line in [
+        " M data/nba_cache/2026-27/1628401.csv",     # not staged
+        "A  data/nba_cache/2026-27/1700001.csv",    # new player file
+        "D  data/nba_cache/2026-27/1628401.csv",
+        "?? data/nba_cache/2026-27/refresh_progress.json",
+        "M  app.py",
+        "M  data/nba_cache/2026-27/refresh_progress.json",
+        "M  .github/workflows/update-nba-player-cache.yml",
+    ]:
+        assert staging.unexpected_changes([line]), line

@@ -69,6 +69,19 @@ def parse_args(argv=None):
         action="store_true",
         help="Restore even files modified after the apply.",
     )
+    parser.add_argument(
+        "--min-player-coverage",
+        type=float,
+        default=0.0,
+        help="Block applying unless this share of cached players is in the "
+        "source (0-1).",
+    )
+    parser.add_argument(
+        "--max-corrected-records",
+        type=int,
+        default=None,
+        help="Block applying if more records than this would be corrected.",
+    )
     return parser.parse_args(argv)
 
 
@@ -172,6 +185,12 @@ def run(args):
             {"player_id": pid, "rows": count} for pid, count in unknown.items()
         ],
         "absent_from_source": len(set(cache_files) - source_player_ids),
+        "cache_player_count": len(cache_files),
+        "source_latest": latest,
+        "cache_latest": max(
+            (plan.local_latest.date() for plan in plans if plan.local_latest is not None),
+            default=None,
+        ),
         "written": written,
         "output_problems": output_problems,
         "source_info": source_info,
@@ -185,7 +204,9 @@ def run(args):
         if plan.existing_file or args.include_new_players
     }
     held_back = len(proposed_files) - len(targets)
-    blockers = apply.gate_problems(context)
+    blockers = apply.gate_problems(
+        context, args.min_player_coverage, args.max_corrected_records
+    )
     result["apply"] = {
         "mode": "apply" if args.apply else "dry-run",
         "gate_passed": not blockers,

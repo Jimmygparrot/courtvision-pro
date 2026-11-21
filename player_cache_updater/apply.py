@@ -23,8 +23,13 @@ def sha256_file(path):
     return digest.hexdigest()
 
 
-def gate_problems(report_context):
-    """Return reasons that block applying; an empty list means safe to apply."""
+def gate_problems(report_context, min_coverage=0.0, max_corrected=None):
+    """Return reasons that block applying; an empty list means safe to apply.
+
+    ``min_coverage`` is the minimum share of cached players that must appear
+    in the source, and ``max_corrected`` caps corrected records; both guard
+    against a truncated or malformed download.
+    """
     problems = []
     if report_context["failures"]:
         problems.append(
@@ -37,6 +42,30 @@ def gate_problems(report_context):
     for plan in report_context["plans"]:
         for problem in plan.problems:
             problems.append(f"player {plan.player_id}: {problem}")
+
+    source_latest = report_context.get("source_latest")
+    cache_latest = report_context.get("cache_latest")
+    if source_latest and cache_latest and source_latest < cache_latest:
+        problems.append(
+            f"source latest game date {source_latest} is older than the "
+            f"cache latest {cache_latest}"
+        )
+
+    cache_players = report_context.get("cache_player_count", 0)
+    if min_coverage and cache_players:
+        absent = report_context["absent_from_source"]
+        coverage = 1 - absent / cache_players
+        if coverage < min_coverage:
+            problems.append(
+                f"source covers {coverage:.0%} of cached players; "
+                f"minimum is {min_coverage:.0%}"
+            )
+
+    corrected = sum(len(plan.corrections) for plan in report_context["plans"])
+    if max_corrected is not None and corrected > max_corrected:
+        problems.append(
+            f"{corrected} corrected records exceed the limit of {max_corrected}"
+        )
     return problems
 
 

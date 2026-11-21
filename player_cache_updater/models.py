@@ -49,6 +49,7 @@ class PlayerPlan:
     ids_normalized: int = 0
     proposed: Optional[pd.DataFrame] = None
     problems: list = field(default_factory=list)
+    local_latest: Optional[pd.Timestamp] = None
 
     @property
     def changed(self):
