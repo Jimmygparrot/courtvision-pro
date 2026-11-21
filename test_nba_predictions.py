@@ -392,7 +392,7 @@ def test_pdf_report_is_generated_in_memory_for_letter_page():
     assert len(report) > 500
 
 
-def test_todays_schedule_falls_back_to_saved_fixture_on_api_error(
+def test_saved_schedule_takes_priority_without_calling_the_scoreboard(
     monkeypatch, tmp_path
 ):
     schedule_path = tmp_path / "schedule.csv"
@@ -407,8 +407,10 @@ def test_todays_schedule_falls_back_to_saved_fixture_on_api_error(
         "awayTeam_teamCity": "New York",
         "awayTeam_teamName": "Knicks",
     }]).to_csv(schedule_path, index=False)
+    scoreboard_calls = []
 
     def unavailable(*args, **kwargs):
+        scoreboard_calls.append(args)
         raise TimeoutError("service unavailable")
 
     monkeypatch.setattr("nba_predictions._scoreboard_schedule", unavailable)
@@ -418,8 +420,26 @@ def test_todays_schedule_falls_back_to_saved_fixture_on_api_error(
     )
 
     assert source == "saved schedule"
+    assert warning is None
+    assert scoreboard_calls == []
     assert games.iloc[0]["game_id"] == "fixture"
     assert games.iloc[0]["home_team"] == "Boston Celtics"
+
+
+def test_missing_saved_schedule_and_scoreboard_timeout_is_unavailable(
+    monkeypatch, tmp_path
+):
+    def unavailable(*args, **kwargs):
+        raise TimeoutError("service unavailable")
+
+    monkeypatch.setattr("nba_predictions._scoreboard_schedule", unavailable)
+    games, source, warning = load_todays_matchups(
+        "2026-11-18",
+        tmp_path / "missing_schedule.csv",
+    )
+
+    assert games.empty
+    assert source == "unavailable"
     assert "TimeoutError" in warning
 
 
@@ -449,7 +469,7 @@ def test_scoreboard_v3_utc_tipoff_joins_schedule_with_unpadded_game_id(
 
     class FakeScoreboard:
         def __init__(self, **kwargs):
-            assert kwargs == {"game_date": "2026-11-19", "timeout": 10}
+            assert kwargs == {"game_date": "2026-11-19", "timeout": 30}
             self.game_header = self
 
         def get_data_frame(self):
