@@ -1,0 +1,150 @@
+name: Update NBA player game logs (test branch)
+
+# Scheduled workflows only run from the default branch. This file lives on the
+# test branch, so the cron entries below stay inert until this single file is
+# also placed on main. When that happens, the job still checks out and pushes
+# to the test branch only (see TARGET_BRANCH).
+#
+# 11:00 AM Eastern is 15:00 UTC during daylight time and 16:00 UTC during
+# standard time, so both crons are listed and the first step skips the one
+# that is not 11 AM in New York.
+on:
+  schedule:
+    - cron: "0 15 * * *"
+    - cron: "0 16 * * *"
+  workflow_dispatch:
+    inputs:
+      apply:
+        description: "Apply and push validated updates (default: dry run only)"
+        type: boolean
+        default: false
+  # A push that changes this file runs a dry run on the test branch so the
+  # workflow can be validated on GitHub without changing any data.
+  push:
+    branches:
+      - nba-game-predictor
+    paths:
+      - .github/workflows/update-nba-player-cache.yml
+
+permissions:
+  contents: write
+
+concurrency:
+  group: update-nba-player-cache
+  cancel-in-progress: false
+
+env:
+  TARGET_BRANCH: nba-game-predictor
+  PYTHONDONTWRITEBYTECODE: "1"
+
+jobs:
+  update:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Decide mode
+        id: mode
+        shell: bash
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          APPLY_INPUT: ${{ inputs.apply }}
+        run: |
+          run=true
+          mode=dry-run
+          if [ "$EVENT_NAME" = "schedule" ]; then
+            hour=$(TZ=America/New_York date +%H)
+            if [ "$hour" = "11" ]; then
+              mode=apply
+            else
+              run=false
+              echo "Skipping: it is hour $hour in New York, not 11."
+            fi
+          elif [ "$EVENT_NAME" = "workflow_dispatch" ] && [ "$APPLY_INPUT" = "true" ]; then
+            mode=apply
+          fi
+          echo "run=$run" >> "$GITHUB_OUTPUT"
+          echo "mode=$mode" >> "$GITHUB_OUTPUT"
+          echo "Event: $EVENT_NAME; mode: $mode; run: $run"
+
+      - name: Check out the test branch
+        if: steps.mode.outputs.run == 'true'
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ env.TARGET_BRANCH }}
+
+      - name: Set up Python
+        if: steps.mode.outputs.run == 'true'
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+
+      - name: Install dependencies
+        if: steps.mode.outputs.run == 'true'
+        run: python -m pip install pandas==2.3.3 pytest
+
+      - name: Run updater tests
+        if: steps.mode.outputs.run == 'true'
+        run: python -m pytest test_player_cache_updater.py -q -p no:cacheprovider
+
+      - name: Download, validate and update player cache
+        if: steps.mode.outputs.run == 'true'
+        shell: bash
+        env:
+          MODE: ${{ steps.mode.outputs.mode }}
+        run: |
+          set -o pipefail
+          args=(
+            --out-dir "$RUNNER_TEMP/player-cache"
+            --min-player-coverage 0.9
+            --max-corrected-records 300
+          )
+          if [ "$MODE" = "apply" ]; then
+            args+=(--apply --backup-dir "$RUNNER_TEMP/player-cache-backup")
+          fi
+          python -m player_cache_updater "${args[@]}" | tee "$RUNNER_TEMP/updater.txt"
+
+      - name: Publish run summary
+        if: always() && steps.mode.outputs.run == 'true'
+        shell: bash
+        run: |
+          {
+            echo "### Player cache updater (${{ steps.mode.outputs.mode }})"
+            echo '```'
+            cat "$RUNNER_TEMP/updater.txt" 2>/dev/null || echo "No updater output."
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload report
+        if: always() && steps.mode.outputs.run == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: player-cache-report
+          path: ${{ runner.temp }}/player-cache/report.json
+          if-no-files-found: ignore
+          retention-days: 14
+
+      - name: Commit and push validated player CSVs
+        if: steps.mode.outputs.run == 'true' && steps.mode.outputs.mode == 'apply'
+        shell: bash
+        run: |
+          test "$(git branch --show-current)" = "$TARGET_BRANCH"
+          git add -- data/nba_cache/2026-27/*.csv
+          git status --porcelain=v1 --untracked-files=all | python -m player_cache_updater.staging
+          if git diff --cached --quiet; then
+            echo "Player cache is unchanged."
+            exit 0
+          fi
+          latest=$(python -c "import json,sys; print(json.load(open(sys.argv[1]))['source']['latest_game_date'])" "$RUNNER_TEMP/player-cache/report.json")
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git commit -m "Update 2026-27 player game logs through $latest"
+          for attempt in 1 2 3; do
+            git fetch origin "$TARGET_BRANCH"
+            if git rebase "origin/$TARGET_BRANCH" && git push origin "HEAD:$TARGET_BRANCH"; then
+              exit 0
+            fi
+            git rebase --abort 2>/dev/null || true
+            sleep $((attempt * 5))
+          done
+          echo "Could not push after 3 attempts."
+          exit 1
