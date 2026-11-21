@@ -130,6 +130,44 @@ def test_matching_latest_game_validates_cache_without_rewriting_or_repeating(
     assert path.read_bytes() == original_bytes
 
 
+def test_padded_and_unpadded_game_ids_merge_as_one_game(
+    monkeypatch, tmp_path
+):
+    use_test_cache(monkeypatch, tmp_path)
+    path = nba_stats.cache_path(12, nba_stats.CURRENT_SEASON)
+    path.parent.mkdir(parents=True)
+    pd.DataFrame({
+        "Game_ID": ["22600240", "22600200"],
+        "GAME_DATE": ["Nov 15, 2026", "Nov 08, 2026"],
+        "PTS": [16, 9],
+    }).to_csv(path, index=False)
+
+    cached = nba_stats.read_cached_games(12, nba_stats.CURRENT_SEASON)
+    assert cached["Game_ID"].tolist() == ["0022600240", "0022600200"]
+
+    class GameLog:
+        def get_data_frames(self):
+            return [pd.DataFrame({
+                "Game_ID": ["0022600245", "0022600240"],
+                "GAME_DATE": ["Nov 16, 2026", "Nov 15, 2026"],
+                "PTS": [9, 16],
+            })]
+
+    monkeypatch.setattr(
+        nba_stats.playergamelog,
+        "PlayerGameLog",
+        lambda **kwargs: GameLog(),
+    )
+    games = nba_stats.get_player_games(
+        12, nba_stats.CURRENT_SEASON, force_refresh=True
+    )
+
+    expected = ["0022600245", "0022600240", "0022600200"]
+    assert games["Game_ID"].tolist() == expected
+    saved = pd.read_csv(path, dtype={"Game_ID": str})
+    assert saved["Game_ID"].tolist() == expected
+
+
 def test_empty_refresh_keeps_existing_data_without_repeating_api_calls(
     monkeypatch, tmp_path
 ):

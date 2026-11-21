@@ -32,9 +32,18 @@ def read_cached_games(player_id, season):
 
     if path.exists():
         try:
-            return pd.read_csv(path)
+            # Keep game IDs as text so leading zeros are not lost.
+            games = pd.read_csv(path, dtype={"Game_ID": str, "GAME_ID": str})
         except pd.errors.EmptyDataError:
             return None
+
+        for column in ("Game_ID", "GAME_ID"):
+            if column in games.columns:
+                numeric = games[column].str.fullmatch(r"\d+").fillna(False)
+                games.loc[numeric, column] = (
+                    games.loc[numeric, column].str.zfill(10)
+                )
+        return games
 
     return None
 
