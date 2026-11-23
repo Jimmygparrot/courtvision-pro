@@ -94,6 +94,9 @@ st.subheader("NBA Player Prop Analytics")
 
 st.write("Version 0.1 — Interactive Basketball Dashboard")
 
+from todays_schedule import render_todays_schedule
+render_todays_schedule()
+
 st.divider()
 
 dashboard_view = st.segmented_control(
