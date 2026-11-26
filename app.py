@@ -124,6 +124,7 @@ if dashboard_view in {"Game winners", "Prediction history"}:
         update_prediction_results,
     )
     from backtesting.nba_daily_predictions import build_prediction_pdf
+    from db import HistoryUnavailable
 
     today = datetime.now(EASTERN).date()
 
@@ -202,8 +203,16 @@ if dashboard_view in {"Game winners", "Prediction history"}:
             current_results,
             previous_results,
         )
-        save_prediction_snapshots(fresh_predictions)
-        history = read_prediction_history()
+        try:
+            save_prediction_snapshots(fresh_predictions)
+            history = read_prediction_history()
+        except HistoryUnavailable as error:
+            st.error(
+                "Prediction history is temporarily unavailable, so today's "
+                "predictions could not be saved or shown. Nothing was "
+                f"stored elsewhere. ({error})"
+            )
+            history = pd.DataFrame()
         if not history.empty:
             saved_predictions = history[
                 history["game_date"] == str(today)
@@ -388,8 +397,15 @@ if dashboard_view in {"Game winners", "Prediction history"}:
     if results_warning:
         st.warning(results_warning)
     actual_results = extract_completed_results(current_results)
-    update_prediction_results(actual_results)
-    history = read_prediction_history()
+    try:
+        update_prediction_results(actual_results)
+        history = read_prediction_history()
+    except HistoryUnavailable as error:
+        st.error(
+            "Prediction history is temporarily unavailable. No results were "
+            f"changed and nothing was stored elsewhere. ({error})"
+        )
+        st.stop()
     if history.empty:
         st.info(
             "No pregame predictions have been saved yet. Future games are "
@@ -447,20 +463,26 @@ if dashboard_view in {"Game winners", "Prediction history"}:
         results["Game Tipoff (ET)"] = results[
             "tipoff_utc"
         ].map(format_eastern_datetime)
+        display_columns = [
+            "Game date",
+            "Away",
+            "Home",
+            "Predicted winner",
+            "Actual winner",
+            "Correct",
+            "Home win probability",
+            "Away win probability",
+            "Prediction timestamp (ET)",
+            "Game Tipoff (ET)",
+            "Model version",
+        ]
+        if "source" in results:
+            results["Record"] = results["source"].map(
+                {"recovered": "Recovered (rounded)"}
+            ).fillna("Saved pregame")
+            display_columns.append("Record")
         st.dataframe(
-            results[[
-                "Game date",
-                "Away",
-                "Home",
-                "Predicted winner",
-                "Actual winner",
-                "Correct",
-                "Home win probability",
-                "Away win probability",
-                "Prediction timestamp (ET)",
-                "Game Tipoff (ET)",
-                "Model version",
-            ]],
+            results[display_columns],
             hide_index=True,
             alt="Saved pregame predictions and completed game results",
         )
