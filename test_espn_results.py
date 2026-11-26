@@ -215,9 +215,7 @@ def test_loader_extends_stale_snapshot_without_nba_api(monkeypatch, tmp_path):
 
     assert results.attrs["source"] == "saved snapshot + ESPN results"
     assert results.attrs["latest_game_date"] == "2026-11-21"
-    assert results.attrs["complete_through"] == "2026-11-21"
-    assert results.attrs["is_stale"] is False
-    assert len(results) == 4
+    assert results.attrs["complete_through"] == "2026-11-22"
     assert not results.duplicated(["GAME_ID", "TEAM_ID"]).any()
     winners = nba_predictions.extract_completed_results(results)
     assert winners["0022600055"] == str(team("CHI")["id"])
@@ -234,8 +232,38 @@ def test_loader_off_day_is_fresh_without_any_request(monkeypatch, tmp_path):
 
     assert calls == []
     assert results.attrs["latest_game_date"] == "2026-11-21"
-    assert results.attrs["complete_through"] == "2026-11-23"
+    assert results.attrs["complete_through"] == "2026-11-24"
     assert results.attrs["is_stale"] is False
+
+
+def test_loader_includes_todays_games_only_once_all_are_final(
+    monkeypatch, tmp_path
+):
+    sched = scheduled(("0022600055", "2026-11-22", "CHA", "CHI"))
+    sched["gameDateTimeUTC"] = "2026-11-22T23:00:00Z"
+    write_loader_files(tmp_path, "2026-11-20", sched)
+    patch_loader(monkeypatch, tmp_path, date(2026, 11, 22), {
+        date(2026, 11, 22): board(event("CHA", "CHI", 50, 48, status="STATUS_IN_PROGRESS"))})
+
+    live = nba_predictions.load_current_season_team_games()
+    assert live.attrs["latest_game_date"] == "2026-11-20"
+    assert live.attrs["complete_through"] == "2026-11-21"
+    assert live.attrs["is_stale"] is False
+
+    patch_loader(monkeypatch, tmp_path, date(2026, 11, 22), {
+        date(2026, 11, 22): board(event("CHA", "CHI", 105, 107))})
+    final = nba_predictions.load_current_season_team_games()
+    assert final.attrs["latest_game_date"] == "2026-11-22"
+    assert final.attrs["complete_through"] == "2026-11-22"
+    # Same-day results never feed a same-day prediction: CHA and CHI have only
+    # their 11/22 game on record, so they have no rating for 11/22.
+    strengths, _ = nba_predictions.team_strengths_for_date(
+        final, pd.DataFrame(), "2026-11-22")
+    assert str(team("CHA")["id"]) not in strengths
+    assert str(team("CHI")["id"]) not in strengths
+    strengths_next, _ = nba_predictions.team_strengths_for_date(
+        final, pd.DataFrame(), "2026-11-23")
+    assert str(team("CHI")["id"]) in strengths_next
 
 
 def test_loader_reports_stale_when_latest_day_not_final(monkeypatch, tmp_path):

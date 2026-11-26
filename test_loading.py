@@ -116,6 +116,9 @@ def test_game_winners_view_shows_empty_schedule_without_external_requests(
     at = app()
     at.get_by_key('cv_dashboard_view').set_value('Game winners').run()
     assert not at.exception
+    today = datetime.now(ZoneInfo("America/New_York")).date()
+    at.get_by_key(f'cv_game_winners_day_{today}').set_value('Today').run()
+    assert not at.exception
     assert any(
         'No current or original pregame predictions' in item.value
         for item in at.info

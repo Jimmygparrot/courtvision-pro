@@ -258,7 +258,10 @@ def _extend_snapshot_with_espn(snapshot_games, snapshot_latest_date):
 
     Returns None when ESPN cannot be used (no saved schedule, or ESPN is
     unreachable), so the caller falls back to the NBA API. Otherwise returns
-    the snapshot plus every confirmed day through yesterday (ET).
+    the snapshot plus every day through today (ET) whose scheduled games are
+    all confirmed final; a day still in progress is left for a later refresh.
+    Pregame predictions only read games before their own date, so including
+    today's finished games cannot leak same-day results.
     """
     schedule_path = ROOT / "data" / f"nba_schedule_{CURRENT_SEASON}.csv"
     if not schedule_path.exists():
@@ -272,7 +275,7 @@ def _extend_snapshot_with_espn(snapshot_games, snapshot_latest_date):
         new_rows, complete_through = espn_results.fetch_missing_team_results(
             scheduled,
             snapshot_latest_date,
-            today - timedelta(days=1),
+            today,
             season_id="2" + CURRENT_SEASON[:4],
         )
     except Exception as error:

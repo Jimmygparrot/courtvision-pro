@@ -94,7 +94,7 @@ st.subheader("NBA Player Prop Analytics")
 
 st.write("Version 0.1 — Interactive Basketball Dashboard")
 
-from todays_schedule import render_todays_schedule
+from todays_schedule import format_tipoff, render_todays_schedule
 render_todays_schedule()
 
 st.divider()
@@ -150,7 +150,22 @@ if dashboard_view in {"Game winners", "Prediction history"}:
             )
 
     if dashboard_view == "Game winners":
-        st.subheader(f"NBA game winners — {today:%B %d, %Y}")
+        tomorrow = today + timedelta(days=1)
+        todays_schedule_games, _, _ = cached_todays_matchups(str(today))
+        default_day = "Today" if not todays_schedule_games.empty else "Tomorrow"
+        # Keyed by date so the default is recomputed after midnight ET.
+        day_choice = st.segmented_control(
+            "Game day",
+            ["Today", "Tomorrow"],
+            default=default_day,
+            key=f"cv_game_winners_day_{today}",
+            width="stretch",
+        ) or default_day
+        is_today = day_choice == "Today"
+        game_day = today if is_today else tomorrow
+        st.subheader(
+            f"NBA game winners — {day_choice}, {game_day:%B %d, %Y}"
+        )
         st.caption(
             "Pregame estimates use only team results from dates before each "
             "game date. Same-day results and live standings are not used."
@@ -163,15 +178,15 @@ if dashboard_view in {"Game winners", "Prediction history"}:
             cached_todays_matchups.clear()
             cached_team_game_logs.clear()
             st.rerun()
-        games_today, schedule_source, schedule_warning = (
-            cached_todays_matchups(str(today))
+        games_for_day, schedule_source, schedule_warning = (
+            cached_todays_matchups(str(game_day))
         )
         if schedule_warning:
             st.warning(schedule_warning)
         if (
-            not games_today.empty
-            and games_today.loc[
-                games_today["status"] == "scheduled", "tipoff_utc"
+            not games_for_day.empty
+            and games_for_day.loc[
+                games_for_day["status"] == "scheduled", "tipoff_utc"
             ].isna().any()
         ):
             st.warning(
@@ -199,23 +214,28 @@ if dashboard_view in {"Game winners", "Prediction history"}:
         previous_results = load_previous_season_team_games()
 
         fresh_predictions = build_pregame_predictions(
-            games_today,
+            games_for_day,
             current_results,
             previous_results,
         )
-        try:
-            save_prediction_snapshots(fresh_predictions)
-            history = read_prediction_history()
-        except HistoryUnavailable as error:
-            st.error(
-                "Prediction history is temporarily unavailable, so today's "
-                "predictions could not be saved or shown. Nothing was "
-                f"stored elsewhere. ({error})"
-            )
+        if is_today:
+            try:
+                save_prediction_snapshots(fresh_predictions)
+                history = read_prediction_history()
+            except HistoryUnavailable as error:
+                st.error(
+                    "Prediction history is temporarily unavailable, so "
+                    "today's predictions could not be saved or shown. "
+                    f"Nothing was stored elsewhere. ({error})"
+                )
+                history = pd.DataFrame()
+        else:
+            # Tomorrow is a preview: official pregame predictions are saved
+            # only on game day, from results through the previous day.
             history = pd.DataFrame()
         if not history.empty:
             saved_predictions = history[
-                history["game_date"] == str(today)
+                history["game_date"] == str(game_day)
             ].copy()
         else:
             saved_predictions = pd.DataFrame()
@@ -300,8 +320,26 @@ if dashboard_view in {"Game winners", "Prediction history"}:
                 "tipoff_utc": "Game Tipoff (ET)",
             })
 
+        def compact_pick_table(predictions):
+            ordered = predictions.assign(
+                _tipoff=pd.to_datetime(
+                    predictions["tipoff_utc"], utc=True, errors="coerce"
+                )
+            ).sort_values("_tipoff", na_position="last")
+            return pd.DataFrame({
+                "Away": ordered["away_team"],
+                "Home": ordered["home_team"],
+                "Pick": ordered["predicted_winner"],
+                "Win %": ordered["win_probability"].map(
+                    lambda value: f"{value:.1%}"
+                ),
+                "Tipoff": ordered["tipoff_utc"].map(format_tipoff),
+            })
+
         if fresh_predictions.empty:
-            if saved_predictions.empty:
+            if not is_today and games_for_day.empty:
+                st.info("No NBA games are scheduled for tomorrow.")
+            elif saved_predictions.empty:
                 st.info(
                     "No current or original pregame predictions are "
                     "available. Predictions are not reconstructed after "
@@ -318,19 +356,31 @@ if dashboard_view in {"Game winners", "Prediction history"}:
                 "These probabilities are calculated from the latest "
                 "available team results."
             )
+            if not is_today:
+                st.caption(
+                    "Preview only: tomorrow's predictions are not saved. "
+                    "Official pregame predictions are saved on game day."
+                )
+            st.dataframe(
+                compact_pick_table(fresh_predictions),
+                hide_index=True,
+                width="stretch",
+                alt="Predicted winners and win probabilities by game",
+            )
             table = prediction_display_table(
                 fresh_predictions,
                 "Current",
                 "Calculated at (ET)",
             )
-            st.dataframe(
-                table,
-                hide_index=True,
-                alt="Current NBA matchup win probabilities",
-            )
+            with st.expander("Full details"):
+                st.dataframe(
+                    table,
+                    hide_index=True,
+                    alt="Current NBA matchup win probabilities",
+                )
 
         if saved_predictions.empty:
-            if not fresh_predictions.empty:
+            if not fresh_predictions.empty and is_today:
                 st.caption("No original saved prediction exists for these games.")
         else:
             st.subheader("Original Saved Prediction")
@@ -372,12 +422,12 @@ if dashboard_view in {"Game winners", "Prediction history"}:
             try:
                 report = build_prediction_pdf(
                     saved_predictions,
-                    today,
+                    game_day,
                 )
                 st.download_button(
                     "Download PDF report",
                     data=report,
-                    file_name=f"CourtVision_Pro_{today}.pdf",
+                    file_name=f"CourtVision_Pro_{game_day}.pdf",
                     mime="application/pdf",
                     width="stretch",
                 )
