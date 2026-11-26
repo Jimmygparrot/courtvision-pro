@@ -278,6 +278,25 @@ def test_prediction_history_renders_eastern_times_and_both_probabilities(
     assert history_table.iloc[0]['Away win probability'].endswith('%')
 
 
+def test_history_outage_shows_error_without_fallback(monkeypatch):
+    import db
+
+    def unavailable(*args, **kwargs):
+        raise db.HistoryUnavailable("Could not connect to the prediction history database.")
+
+    monkeypatch.setattr(nba_predictions, 'load_current_season_team_games', lambda: pd.DataFrame())
+    monkeypatch.setattr(nba_predictions, 'extract_completed_results', lambda team_games: {})
+    monkeypatch.setattr(nba_predictions, 'update_prediction_results', unavailable)
+    monkeypatch.setattr(nba_predictions, 'read_prediction_history', unavailable)
+
+    at = app()
+    at.get_by_key('cv_dashboard_view').set_value('Prediction history').run()
+
+    assert not at.exception
+    assert any('temporarily unavailable' in item.value for item in at.error)
+    assert not any('Actual winner' in t.value.columns for t in at.dataframe)
+
+
 def test_statistics_failure_can_retry_and_widgets_do_not_reload(monkeypatch):
     calls = []
     def download(*args, **kwargs):

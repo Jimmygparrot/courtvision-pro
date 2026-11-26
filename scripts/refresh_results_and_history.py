@@ -120,8 +120,11 @@ def refresh_with_retries(csv_path, sleep=time.sleep):
             sleep(BACKOFF_SECONDS * attempt)
 
 
-def reconcile(csv_path, db_path):
-    """Resolve saved predictions for completed games; returns rows updated."""
+def reconcile(csv_path, db_path=None):
+    """Resolve saved predictions for completed games; returns rows updated.
+
+    ``db_path=None`` uses the shared PostgreSQL history; a path selects SQLite.
+    """
     # Read GAME_ID as text: the default integer parse drops leading zeros, so
     # results would never match the saved ten-digit prediction IDs.
     games = pd.read_csv(csv_path, dtype={"GAME_ID": str})
@@ -133,12 +136,16 @@ def reconcile(csv_path, db_path):
 
 
 def run(csv_path, db_path, backup_dir, sleep=time.sleep):
-    csv_path, db_path = Path(csv_path), Path(db_path)
-    if not db_path.exists():
-        # Opening a missing path would silently create an empty database.
-        raise FileNotFoundError(f"Prediction history not found: {db_path}")
-    backup = backup_database(db_path, backup_dir)
-    logger.info("Database backup written: %s", backup)
+    csv_path = Path(csv_path)
+    if db_path is None:
+        logger.info("Using the shared PostgreSQL prediction history.")
+    else:
+        db_path = Path(db_path)
+        if not db_path.exists():
+            # Opening a missing path would silently create an empty database.
+            raise FileNotFoundError(f"Prediction history not found: {db_path}")
+        backup = backup_database(db_path, backup_dir)
+        logger.info("Database backup written: %s", backup)
 
     latest = refresh_with_retries(csv_path, sleep)
     logger.info("Results refreshed through %s: %s", latest, csv_path)
@@ -149,7 +156,9 @@ def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--csv", default=str(
         ROOT / "data" / "historical" / f"nba_games_{nba.CURRENT_SEASON}.csv"))
-    parser.add_argument("--db", default=str(nba.HISTORY_PATH))
+    parser.add_argument("--db", default=None, help=(
+        "SQLite file to reconcile instead of the shared PostgreSQL history "
+        "(legacy/testing only)."))
     parser.add_argument("--log-dir", default=str(ROOT / "logs"))
     parser.add_argument("--backup-dir", default=str(ROOT / "backups"))
     parser.add_argument("--lock-file", default=str(ROOT / "logs" / "refresh_results.lock"))
