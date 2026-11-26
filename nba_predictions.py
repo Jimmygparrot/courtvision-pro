@@ -796,7 +796,9 @@ def extract_completed_results(team_games):
         return {}
 
     results = {}
-    for game_id, rows in team_games.groupby("GAME_ID"):
+    # The saved snapshot is read from CSV, where GAME_ID loses its leading zeros.
+    game_ids = team_games["GAME_ID"].map(_normalize_game_id)
+    for game_id, rows in team_games.groupby(game_ids):
         if (
             len(rows) != 2
             or rows["TEAM_ID"].nunique() != 2

@@ -44,3 +44,8 @@ player_teams_backup.json
 # Cloud migration backups
 live_odds_before_cloud.py
 app_before_login.py
+
+# Results-refresh job output (logs and database backups)
+logs/
+backups/
+nba_prediction_history_*.sqlite3
