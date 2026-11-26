@@ -15,6 +15,8 @@ ROOT = Path(__file__).resolve().parent
 CURRENT_SEASON = "2026-27"
 PREVIOUS_SEASON = "2025-26"
 NBA_TEAM_COUNT = 30
+# Cloud hosts are refused by stats.nba.com, so a long wait only slows the app.
+NBA_API_FALLBACK_TIMEOUT_SECONDS = 10
 MODEL_VERSION = "pregame-win-rate-logistic-cross-season-v1"
 MODEL_COEFFICIENT = 4.1196
 MODEL_INTERCEPT = 0.1982
@@ -251,6 +253,75 @@ def load_todays_matchups(game_date, schedule_path=None):
             f"({type(error).__name__}).",
         )
 
+def _extend_snapshot_with_espn(snapshot_games, snapshot_latest_date):
+    """Add schedule-validated ESPN finals to a stale snapshot.
+
+    Returns None when ESPN cannot be used (no saved schedule, or ESPN is
+    unreachable), so the caller falls back to the NBA API. Otherwise returns
+    the snapshot plus every confirmed day through yesterday (ET).
+    """
+    schedule_path = ROOT / "data" / f"nba_schedule_{CURRENT_SEASON}.csv"
+    if not schedule_path.exists():
+        return None
+
+    import espn_results
+
+    today = _today_eastern()
+    try:
+        scheduled = _read_saved_schedule(schedule_path)
+        new_rows, complete_through = espn_results.fetch_missing_team_results(
+            scheduled,
+            snapshot_latest_date,
+            today - timedelta(days=1),
+            season_id="2" + CURRENT_SEASON[:4],
+        )
+    except Exception as error:
+        logger.warning(
+            "ESPN results unavailable (%s: %s); falling back to the NBA API.",
+            type(error).__name__,
+            error,
+        )
+        return None
+
+    games = snapshot_games
+    if not new_rows.empty:
+        games = pd.concat([snapshot_games, new_rows], ignore_index=True)
+    games = games.assign(GAME_ID=games["GAME_ID"].map(_normalize_game_id))
+    if games.duplicated(["GAME_ID", "TEAM_ID"]).any():
+        logger.warning("ESPN results duplicated saved games; ignoring them.")
+        return None
+
+    latest_game_date = pd.to_datetime(
+        games["GAME_DATE"], format="mixed", errors="coerce"
+    ).max().date()
+    is_stale = complete_through < today - timedelta(days=1)
+    warning = None
+    if is_stale:
+        warning = (
+            "Team results are confirmed only through "
+            f"{pd.Timestamp(complete_through):%b} {complete_through.day}, "
+            f"{complete_through.year}; newer games were not yet final."
+        )
+    logger.info(
+        "Team results extended with ESPN: new_rows=%d latest=%s complete=%s",
+        len(new_rows),
+        latest_game_date,
+        complete_through,
+    )
+    games = _set_team_results_metadata(
+        games,
+        source=(
+            "saved snapshot + ESPN results"
+            if not new_rows.empty else "saved current-season snapshot"
+        ),
+        latest_game_date=latest_game_date,
+        is_stale=is_stale,
+        warning=warning,
+    )
+    games.attrs["complete_through"] = complete_through.isoformat()
+    return games
+
+
 def load_current_season_team_games():
     """Load fresh current-season results or return a dated stale snapshot."""
     snapshot = ROOT / "data" / "historical" / f"nba_games_{CURRENT_SEASON}.csv"
@@ -303,6 +374,12 @@ def load_current_season_team_games():
                 is_stale=False,
             )
 
+        extended = _extend_snapshot_with_espn(
+            snapshot_games, snapshot_latest_date
+        )
+        if extended is not None:
+            return extended
+
     logger.info(
         "Refreshing current-season team results from the NBA API; "
         "valid_snapshot=%s",
@@ -315,7 +392,7 @@ def load_current_season_team_games():
             player_or_team_abbreviation="T",
             season=CURRENT_SEASON,
             season_type_all_star="Regular Season",
-            timeout=30,
+            timeout=NBA_API_FALLBACK_TIMEOUT_SECONDS,
         ).get_data_frames()[0]
         api_games, api_latest_date = _prepare_team_results(api_games)
         return _set_team_results_metadata(

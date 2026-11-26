@@ -228,6 +228,9 @@ if dashboard_view in {"Game winners", "Prediction history"}:
                 "%b %d, %Y"
             ).replace(" 0", " ")
             data_age = (today - latest_game).days
+            complete_through = current_results.attrs.get("complete_through")
+            if complete_through:
+                data_age = (today - pd.Timestamp(complete_through).date()).days
             if current_results.attrs.get("is_stale") is True:
                 freshness = "stale saved snapshot"
             elif data_age > 1:

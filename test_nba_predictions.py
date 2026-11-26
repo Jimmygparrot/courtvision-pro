@@ -191,7 +191,7 @@ def test_stale_team_snapshot_uses_successful_api_refresh(
         "player_or_team_abbreviation": "T",
         "season": "2026-27",
         "season_type_all_star": "Regular Season",
-        "timeout": 30,
+        "timeout": nba_predictions.NBA_API_FALLBACK_TIMEOUT_SECONDS,
     }]
     assert results["GAME_DATE"].tolist() == [
         "2026-11-20",
