@@ -75,11 +75,7 @@ def format_eastern_datetime(value):
     )
 
 
-def _local_schedule(schedule_path, game_date):
-    path = Path(schedule_path)
-    if not path.exists():
-        return pd.DataFrame()
-
+def _read_saved_schedule(path):
     schedule = pd.read_csv(path, dtype={
         "gameId": str,
         "homeTeam_teamId": str,
@@ -93,6 +89,31 @@ def _local_schedule(schedule_path, game_date):
         .dt.tz_convert(EASTERN)
         .dt.date.astype(str)
     )
+    return schedule
+
+
+def _saved_schedule_covers(schedule_path, game_date):
+    """True when game_date (ET) lies within the saved schedule's date span."""
+    path = Path(schedule_path)
+    if not path.exists():
+        return False
+    try:
+        dates = _read_saved_schedule(path)["game_date"].dropna()
+    except (OSError, KeyError, ValueError, pd.errors.ParserError,
+            pd.errors.EmptyDataError):
+        return False
+    dates = dates[dates != "NaT"]
+    if dates.empty:
+        return False
+    return dates.min() <= str(game_date) <= dates.max()
+
+
+def _local_schedule(schedule_path, game_date):
+    path = Path(schedule_path)
+    if not path.exists():
+        return pd.DataFrame()
+
+    schedule = _read_saved_schedule(path)
     schedule = schedule[schedule["game_date"] == str(game_date)].copy()
     if schedule.empty:
         return pd.DataFrame()
@@ -190,13 +211,20 @@ def _scoreboard_schedule(game_date, schedule_path):
 
 
 def load_todays_matchups(game_date, schedule_path=None):
-    """Prefer today's scoreboard; fall back to the saved schedule on API failure."""
+    """Use the saved schedule when it has or rules out games for the date.
+
+    The NBA scoreboard is queried only for dates outside the saved schedule.
+    """
     if schedule_path is None:
         schedule_path = ROOT / "data" / f"nba_schedule_{CURRENT_SEASON}.csv"
 
     local_games = _local_schedule(schedule_path, game_date)
     if not local_games.empty:
         return local_games, "saved schedule", None
+    if _saved_schedule_covers(schedule_path, game_date):
+        # A date inside the saved season span with no games is an off day;
+        # skip the NBA API, which can hang for its full timeout.
+        return pd.DataFrame(), "saved schedule", None
     try:
         live_games = _scoreboard_schedule(game_date, schedule_path)
         if not live_games.empty:

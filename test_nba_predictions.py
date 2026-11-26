@@ -379,6 +379,98 @@ def test_started_or_completed_games_are_not_saved(tmp_path):
     ) == 1
 
 
+def _saved_schedule(path, utc_times):
+    pd.DataFrame([{
+        "gameId": f"fixture-{index}",
+        "gameDateTimeUTC": tipoff,
+        "gameStatus": 1,
+        "homeTeam_teamId": 1,
+        "homeTeam_teamCity": "Boston",
+        "homeTeam_teamName": "Celtics",
+        "awayTeam_teamId": 2,
+        "awayTeam_teamCity": "New York",
+        "awayTeam_teamName": "Knicks",
+    } for index, tipoff in enumerate(utc_times)]).to_csv(path, index=False)
+
+
+def _scoreboard_spy(monkeypatch, result=None, error=None):
+    calls = []
+
+    def scoreboard(*args, **kwargs):
+        calls.append(args)
+        if error:
+            raise error
+        return result if result is not None else pd.DataFrame()
+
+    monkeypatch.setattr("nba_predictions._scoreboard_schedule", scoreboard)
+    return calls
+
+
+def test_saved_schedule_date_with_games_skips_scoreboard(monkeypatch, tmp_path):
+    path = tmp_path / "schedule.csv"
+    _saved_schedule(path, ["2026-11-18T23:00:00Z", "2026-11-20T23:00:00Z"])
+    calls = _scoreboard_spy(monkeypatch, error=TimeoutError("down"))
+
+    games, source, warning = load_todays_matchups("2026-11-20", path)
+
+    assert games["game_id"].tolist() == ["fixture-1"]
+    assert (source, warning) == ("saved schedule", None)
+    assert calls == []
+
+
+def test_saved_schedule_off_day_is_authoritative_without_scoreboard(
+    monkeypatch, tmp_path
+):
+    path = tmp_path / "schedule.csv"
+    _saved_schedule(path, ["2026-11-25T23:00:00Z", "2026-11-28T00:00:00Z"])
+    calls = _scoreboard_spy(monkeypatch, error=TimeoutError("down"))
+
+    # 2026-11-28T00:00Z is 7 PM ET on the 27th, so the 26th has no games.
+    games, source, warning = load_todays_matchups("2026-11-26", path)
+
+    assert games.empty
+    assert (source, warning) == ("saved schedule", None)
+    assert calls == []
+
+
+@pytest.mark.parametrize("game_date", ["2026-11-17", "2026-11-28"])
+def test_date_outside_saved_schedule_still_uses_scoreboard(
+    monkeypatch, tmp_path, game_date
+):
+    path = tmp_path / "schedule.csv"
+    _saved_schedule(path, ["2026-11-18T23:00:00Z", "2026-11-20T23:00:00Z"])
+    live = pd.DataFrame([{"game_id": "live-1", "game_date": game_date}])
+    calls = _scoreboard_spy(monkeypatch, result=live)
+
+    games, source, warning = load_todays_matchups(game_date, path)
+
+    assert len(calls) == 1
+    assert games["game_id"].tolist() == ["live-1"]
+    assert (source, warning) == ("NBA scoreboard", None)
+
+
+def test_date_outside_saved_schedule_reports_scoreboard_timeout(
+    monkeypatch, tmp_path
+):
+    path = tmp_path / "schedule.csv"
+    _saved_schedule(path, ["2026-11-18T23:00:00Z"])
+    _scoreboard_spy(monkeypatch, error=TimeoutError("down"))
+
+    games, source, warning = load_todays_matchups("2027-06-01", path)
+
+    assert games.empty
+    assert source == "unavailable"
+    assert "TimeoutError" in warning
+
+
+def test_missing_saved_schedule_still_uses_scoreboard(monkeypatch, tmp_path):
+    calls = _scoreboard_spy(monkeypatch)
+
+    load_todays_matchups("2026-11-26", tmp_path / "missing.csv")
+
+    assert len(calls) == 1
+
+
 def test_pdf_report_is_generated_in_memory_for_letter_page():
     predictions = build_pregame_predictions(
         schedule_rows().iloc[[0]],

@@ -45,6 +45,30 @@ def test_empty_and_failure(monkeypatch):
     assert ts.fetch_schedule_rows(None) == ([], True)
 
 
+def test_saved_schedule_off_day_shows_no_games_without_error(monkeypatch, tmp_path):
+    import nba_predictions as nba
+
+    path = tmp_path / "schedule.csv"
+    pd.DataFrame([{
+        "gameId": f"g{i}", "gameDateTimeUTC": tipoff, "gameStatus": 1,
+        "homeTeam_teamId": 1, "homeTeam_teamCity": "A", "homeTeam_teamName": "B",
+        "awayTeam_teamId": 2, "awayTeam_teamCity": "C", "awayTeam_teamName": "D",
+    } for i, tipoff in enumerate(["2026-11-25T23:00:00Z", "2026-11-28T00:00:00Z"])]
+    ).to_csv(path, index=False)
+
+    def no_api(*args, **kwargs):
+        raise AssertionError("NBA API must not be called on a saved off day")
+
+    monkeypatch.setattr(nba, "_scoreboard_schedule", no_api)
+    real = nba.load_todays_matchups
+    monkeypatch.setattr(
+        nba, "load_todays_matchups", lambda d: real(d, path)
+    )
+    import datetime as dt
+
+    assert ts.fetch_schedule_rows(dt.date(2026, 11, 26)) == ([], False)
+
+
 def _g(status, text="", period=0, clock="", a=0, h=0):
     return {"gameStatus": status, "gameStatusText": text, "period": period,
             "gameClock": clock, "awayTeam": {"score": a}, "homeTeam": {"score": h}}
