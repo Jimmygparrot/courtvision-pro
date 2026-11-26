@@ -1,0 +1,158 @@
+name: Refresh NBA statistics
+
+# Refreshes the team results and player game logs the Streamlit app reads, and
+# commits them to TARGET_BRANCH (which Streamlit Cloud deploys).
+#
+# Scheduled workflows only run from the default branch. While this file exists
+# only on TARGET_BRANCH the cron entries below stay inert; a push that changes
+# this file runs a DRY RUN here, so access to ESPN and sportsdataverse from a
+# GitHub runner can be proven without changing any data. When the same file is
+# placed on main, the schedule applies updates to TARGET_BRANCH only.
+#
+# GitHub starts scheduled runs late (often by hours), so there is deliberately
+# no "only at hour N" guard. Several runs are scheduled between about 7 and 11
+# AM Eastern (07 minutes past 12:00-15:00 UTC covers both daylight and standard
+# time). Each run is idempotent: when nothing is missing it changes nothing and
+# creates no commit, and a failed or incomplete run is simply retried by the
+# next one.
+on:
+  schedule:
+    - cron: "7 12-15 * * *"
+  workflow_dispatch:
+    inputs:
+      apply:
+        description: "Apply and push validated updates (default: dry run only)"
+        type: boolean
+        default: false
+  push:
+    branches:
+      - integration/postgres-on-live
+    paths:
+      - .github/workflows/refresh-statistics.yml
+
+permissions:
+  contents: write
+
+concurrency:
+  group: refresh-statistics
+  cancel-in-progress: false
+
+env:
+  TARGET_BRANCH: integration/postgres-on-live
+  PYTHONDONTWRITEBYTECODE: "1"
+
+jobs:
+  refresh:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Decide mode
+        id: mode
+        shell: bash
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          APPLY_INPUT: ${{ inputs.apply }}
+        run: |
+          mode=dry-run
+          if [ "$EVENT_NAME" = "schedule" ]; then
+            mode=apply
+          elif [ "$EVENT_NAME" = "workflow_dispatch" ] && [ "$APPLY_INPUT" = "true" ]; then
+            mode=apply
+          fi
+          echo "mode=$mode" >> "$GITHUB_OUTPUT"
+          echo "Event: $EVENT_NAME; mode: $mode"
+
+      - name: Check out the target branch
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ env.TARGET_BRANCH }}
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+
+      - name: Install dependencies
+        run: python -m pip install pandas==2.3.3 requests nba_api==1.12.0 pytest
+
+      - name: Run tests
+        run: python -m pytest test_player_cache_updater.py test_espn_results.py test_refresh_statistics.py -q -p no:cacheprovider
+
+      - name: Refresh statistics
+        id: refresh
+        shell: bash
+        env:
+          MODE: ${{ steps.mode.outputs.mode }}
+        run: |
+          args=(--probe --out-dir "$RUNNER_TEMP/refresh")
+          if [ "$MODE" = "apply" ]; then
+            args+=(--apply)
+          fi
+          set +e
+          python scripts/refresh_statistics.py "${args[@]}" 2>&1 | tee "$RUNNER_TEMP/refresh.txt"
+          code=${PIPESTATUS[0]}
+          set -e
+          echo "code=$code" >> "$GITHUB_OUTPUT"
+          echo "Refresh exit code: $code (0 complete, 1 error, 10 incomplete)"
+
+      - name: Publish run summary
+        if: always()
+        shell: bash
+        run: |
+          {
+            echo "### NBA statistics refresh (${{ steps.mode.outputs.mode }})"
+            echo '```'
+            grep -A8 '^Statistics refresh' "$RUNNER_TEMP/refresh.txt" 2>/dev/null || echo "No refresh output."
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: statistics-refresh-report
+          path: |
+            ${{ runner.temp }}/refresh/refresh_result.json
+            ${{ runner.temp }}/refresh/players/report.json
+          if-no-files-found: ignore
+          retention-days: 14
+
+      - name: Commit and push validated statistics
+        if: steps.mode.outputs.mode == 'apply'
+        shell: bash
+        run: |
+          test "$(git branch --show-current)" = "$TARGET_BRANCH"
+          git add -- data/historical/nba_games_2026-27.csv data/refresh_status.json 'data/nba_cache/2026-27/*.csv'
+          git status --porcelain=v1 --untracked-files=all | python scripts/refresh_statistics.py --check-staged
+          if git diff --cached --quiet; then
+            echo "No statistics changed; nothing to commit."
+            exit 0
+          fi
+          message=$(python - "$RUNNER_TEMP/refresh/refresh_result.json" <<'PY'
+          import json, sys
+          result = json.load(open(sys.argv[1]))
+          team = result["team_results"].get("latest_game_date")
+          player = result["player_stats"].get("source_latest_game_date")
+          print(f"Update NBA statistics (team results through {team}, player logs through {player})")
+          PY
+          )
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git commit -m "$message"
+          for attempt in 1 2 3; do
+            git fetch origin "$TARGET_BRANCH"
+            if git rebase "origin/$TARGET_BRANCH" && git push origin "HEAD:$TARGET_BRANCH"; then
+              exit 0
+            fi
+            git rebase --abort 2>/dev/null || true
+            sleep $((attempt * 5))
+          done
+          echo "Could not push after 3 attempts."
+          exit 1
+
+      - name: Fail the run if the refresh was not complete
+        if: always() && steps.refresh.outputs.code != '0'
+        shell: bash
+        run: |
+          echo "Refresh exit code was ${{ steps.refresh.outputs.code }}; a later scheduled run will retry."
+          exit 1
