@@ -744,19 +744,47 @@ def _connect(history_path):
     return connection
 
 
-def save_prediction_snapshots(predictions, history_path=HISTORY_PATH):
+def _pregame_rows(predictions):
+    """Rows eligible to be saved: scheduled, with a tipoff after creation."""
+    for row in predictions.to_dict("records"):
+        created = pd.to_datetime(row["created_at"], utc=True)
+        tipoff = pd.to_datetime(row.get("tipoff_utc"), utc=True, errors="coerce")
+        if row.get("status") != "scheduled" or pd.isna(tipoff):
+            continue
+        if created >= tipoff:
+            continue
+        yield row
+
+
+def save_prediction_snapshots(predictions, history_path=None):
+    """Save pregame predictions.
+
+    With no ``history_path`` the shared PostgreSQL history is used and a
+    failure raises ``db.HistoryUnavailable``. An explicit ``history_path``
+    selects a SQLite file (tests and migration tools only).
+    """
     if predictions is None or predictions.empty:
         return 0
 
+    if history_path is None:
+        import db
+
+        return db.save_predictions([
+            (
+                row["game_id"], row["game_date"], row.get("tipoff_utc"),
+                row["home_team_id"], row["home_team"],
+                row["away_team_id"], row["away_team"], row["predicted_winner"],
+                float(row["home_win_probability"]),
+                float(row["away_win_probability"]),
+                float(row["win_probability"]),
+                row["created_at"], row["model_version"], row["rating_source"],
+            )
+            for row in _pregame_rows(predictions)
+        ])
+
     saved = 0
     with _connect(history_path) as connection:
-        for row in predictions.to_dict("records"):
-            created = pd.to_datetime(row["created_at"], utc=True)
-            tipoff = pd.to_datetime(row.get("tipoff_utc"), utc=True, errors="coerce")
-            if row.get("status") != "scheduled" or pd.isna(tipoff):
-                continue
-            if created >= tipoff:
-                continue
+        for row in _pregame_rows(predictions):
             cursor = connection.execute(
                 """
                 INSERT OR IGNORE INTO predictions (
@@ -812,9 +840,14 @@ def extract_completed_results(team_games):
     return results
 
 
-def update_prediction_results(actual_winners, history_path=HISTORY_PATH, now=None):
+def update_prediction_results(actual_winners, history_path=None, now=None):
+    """Record winners of confirmed-final games (see ``extract_completed_results``)."""
     if not actual_winners:
         return 0
+    if history_path is None:
+        import db
+
+        return db.record_results(actual_winners, completed_at=now)
     if now is None:
         now = datetime.now(timezone.utc).isoformat()
     updated = 0
@@ -833,7 +866,18 @@ def update_prediction_results(actual_winners, history_path=HISTORY_PATH, now=Non
     return updated
 
 
-def read_prediction_history(history_path=HISTORY_PATH):
+def read_prediction_accuracy():
+    """Cumulative totals from the unified PostgreSQL accuracy view."""
+    import db
+
+    return db.read_accuracy()
+
+
+def read_prediction_history(history_path=None):
+    if history_path is None:
+        import db
+
+        return db.read_history()
     path = Path(history_path)
     if not path.exists():
         return pd.DataFrame()
